@@ -117,7 +117,15 @@ module HfStorage =
             Presenters = defaultPresenters
             Rubric = defaultRubric
             Reviews = initialReviews
-            HfConfig = None
+            HfConfig =
+                Some
+                    {
+                        RepoId = "vykrum/peer-review"
+                        ApiToken = ""
+                        AutoSync = true
+                        LastSyncTime = None
+                        LastSyncStatus = Some "Ready to connect"
+                    }
             LastUpdated = DateTime.UtcNow
         }
 

@@ -100,7 +100,7 @@ let initModel : Model =
         EditableRubric = seed.Rubric
         EditablePresenters = seed.Presenters
         BulkPresentersText = bulk
-        HfRepoInput = ""
+        HfRepoInput = "vykrum/peer-review"
         HfTokenInput = ""
         IsHfSyncing = false
 
@@ -249,8 +249,8 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
 
         let hfRepo, hfToken =
             match loadedState.HfConfig with
-            | Some cfg -> cfg.RepoId, cfg.ApiToken
-            | None -> "", ""
+            | Some cfg -> (if String.IsNullOrWhiteSpace cfg.RepoId then "vykrum/peer-review" else cfg.RepoId), cfg.ApiToken
+            | None -> "vykrum/peer-review", ""
 
         let nextModel =
             { model with
