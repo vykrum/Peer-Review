@@ -430,21 +430,32 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                 "Active presenter set to '" + name + "'."
             | None -> "Active stage spotlight cleared."
 
-        let saveCmd = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
-        { model with Studio = updatedStudio; SuccessAlert = Some msg }, saveCmd
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        let syncCmd =
+            match updatedStudio.HfConfig with
+            | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
+                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cfg.RepoId cfg.ApiToken updatedStudio) () GotHfSyncResult OnException
+            | _ -> Cmd.none
+        { model with Studio = updatedStudio; SuccessAlert = Some msg }, Cmd.batch [ saveLocal; syncCmd ]
 
     | UpdateRubricCriterionTitle (i, title) ->
         let updated = model.EditableRubric |> List.mapi (fun idx c -> if idx = i then { c with Title = title } else c)
-        { model with EditableRubric = updated }, Cmd.none
+        let updatedStudio = { model.Studio with Rubric = updated; LastUpdated = DateTime.UtcNow }
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        { model with EditableRubric = updated; Studio = updatedStudio }, saveLocal
 
     | UpdateRubricCriterionDesc (i, desc) ->
         let updated = model.EditableRubric |> List.mapi (fun idx c -> if idx = i then { c with Description = desc } else c)
-        { model with EditableRubric = updated }, Cmd.none
+        let updatedStudio = { model.Studio with Rubric = updated; LastUpdated = DateTime.UtcNow }
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        { model with EditableRubric = updated; Studio = updatedStudio }, saveLocal
 
     | UpdateRubricCriterionMax (i, maxVal) ->
         let validMax = Math.Max(1, Math.Min(100, maxVal))
         let updated = model.EditableRubric |> List.mapi (fun idx c -> if idx = i then { c with MaxScore = validMax } else c)
-        { model with EditableRubric = updated }, Cmd.none
+        let updatedStudio = { model.Studio with Rubric = updated; LastUpdated = DateTime.UtcNow }
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        { model with EditableRubric = updated; Studio = updatedStudio }, saveLocal
 
     | AddRubricCriterion ->
         let newIdx = model.EditableRubric.Length + 1
@@ -456,25 +467,37 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                 MaxScore = 25
                 Weight = 1.0
             }
-        { model with EditableRubric = model.EditableRubric @ [ newCrit ] }, Cmd.none
+        let updated = model.EditableRubric @ [ newCrit ]
+        let updatedStudio = { model.Studio with Rubric = updated; LastUpdated = DateTime.UtcNow }
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        { model with EditableRubric = updated; Studio = updatedStudio }, saveLocal
 
     | RemoveRubricCriterion i ->
         if model.EditableRubric.Length <= 1 then
             { model with ErrorAlert = Some "Rubric must contain at least one evaluation dimension." }, Cmd.none
         else
             let updated = model.EditableRubric |> List.indexed |> List.filter (fun (idx, _) -> idx <> i) |> List.map snd
-            { model with EditableRubric = updated }, Cmd.none
+            let updatedStudio = { model.Studio with Rubric = updated; LastUpdated = DateTime.UtcNow }
+            let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+            { model with EditableRubric = updated; Studio = updatedStudio }, saveLocal
 
     | ResetRubricToDefaults ->
-        { model with EditableRubric = HfStorage.defaultRubric; InfoAlert = Some "Draft reset to architecture studio standard 4-dimension rubric." }, Cmd.none
+        let updatedStudio = { model.Studio with Rubric = HfStorage.defaultRubric; LastUpdated = DateTime.UtcNow }
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        { model with EditableRubric = HfStorage.defaultRubric; Studio = updatedStudio; InfoAlert = Some "Draft reset to architecture studio standard 4-dimension rubric." }, saveLocal
 
     | SaveRubric ->
         let updatedStudio = { model.Studio with Rubric = model.EditableRubric; LastUpdated = DateTime.UtcNow }
-        let saveCmd = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        let syncCmd =
+            match updatedStudio.HfConfig with
+            | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
+                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cfg.RepoId cfg.ApiToken updatedStudio) () GotHfSyncResult OnException
+            | _ -> Cmd.none
         { model with
             Studio = updatedStudio
             SuccessAlert = Some ("Rubric saved with " + string model.EditableRubric.Length + " criteria (Total: " + string (model.EditableRubric |> List.sumBy (fun c -> c.MaxScore)) + " marks).")
-        }, saveCmd
+        }, Cmd.batch [ saveLocal; syncCmd ]
 
     | SetBulkPresentersText text ->
         { model with BulkPresentersText = text }, Cmd.none
@@ -503,14 +526,22 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                 )
                 |> Array.toList
 
+            let updatedStudio = { model.Studio with Presenters = parsed; LastUpdated = DateTime.UtcNow }
+            let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
             { model with
                 EditablePresenters = parsed
-                InfoAlert = Some ("Parsed " + string parsed.Length + " student presenters into the roster. Click 'Save Presenter Roster' to commit.")
-            }, Cmd.none
+                Studio = updatedStudio
+                InfoAlert = Some ("Parsed " + string parsed.Length + " student presenters. Click 'Save Presenter Roster' to sync with Hugging Face.")
+            }, saveLocal
 
     | UpdatePresenterField (i, name, title) ->
         let updated = model.EditablePresenters |> List.mapi (fun idx p -> if idx = i then { p with Name = name; ProjectTitle = title } else p)
-        { model with EditablePresenters = updated }, Cmd.none
+        let updatedStudio = { model.Studio with Presenters = updated; LastUpdated = DateTime.UtcNow }
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        { model with
+            EditablePresenters = updated
+            Studio = updatedStudio
+        }, saveLocal
 
     | RemovePresenter i ->
         let updated =
@@ -518,7 +549,9 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
             |> List.indexed
             |> List.filter (fun (idx, _) -> idx <> i)
             |> List.mapi (fun newOrder (_, p) -> { p with Order = newOrder + 1 })
-        { model with EditablePresenters = updated }, Cmd.none
+        let updatedStudio = { model.Studio with Presenters = updated; LastUpdated = DateTime.UtcNow }
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        { model with EditablePresenters = updated; Studio = updatedStudio }, saveLocal
 
     | AddSinglePresenter ->
         let order = model.EditablePresenters.Length + 1
@@ -529,15 +562,23 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                 ProjectTitle = "Architectural Project"
                 Order = order
             }
-        { model with EditablePresenters = model.EditablePresenters @ [ newPres ] }, Cmd.none
+        let updated = model.EditablePresenters @ [ newPres ]
+        let updatedStudio = { model.Studio with Presenters = updated; LastUpdated = DateTime.UtcNow }
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        { model with EditablePresenters = updated; Studio = updatedStudio }, saveLocal
 
     | SavePresenters ->
         let updatedStudio = { model.Studio with Presenters = model.EditablePresenters; LastUpdated = DateTime.UtcNow }
-        let saveCmd = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+        let syncCmd =
+            match updatedStudio.HfConfig with
+            | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
+                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cfg.RepoId cfg.ApiToken updatedStudio) () GotHfSyncResult OnException
+            | _ -> Cmd.none
         { model with
             Studio = updatedStudio
-            SuccessAlert = Some ("Presenter roster updated with " + string model.EditablePresenters.Length + " students.")
-        }, saveCmd
+            SuccessAlert = Some ("Presenter roster updated with " + string model.EditablePresenters.Length + " students and synced!")
+        }, Cmd.batch [ saveLocal; syncCmd ]
 
     | ExportCsv ->
         let csv = HfStorage.generateCsv model.Studio
@@ -619,11 +660,21 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
             }
 
         let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js mergedStudio) () OnException
+        let currentEditablePresenters =
+            if model.AdminSubTab = SubTabPresenters then model.EditablePresenters
+            else mergedStudio.Presenters
+        let currentEditableRubric =
+            if model.AdminSubTab = SubTabRubric then model.EditableRubric
+            else mergedStudio.Rubric
+        let currentBulk =
+            if model.AdminSubTab = SubTabPresenters then model.BulkPresentersText
+            else bulk
+
         { model with
             Studio = mergedStudio
-            EditableRubric = mergedStudio.Rubric
-            EditablePresenters = mergedStudio.Presenters
-            BulkPresentersText = bulk
+            EditableRubric = currentEditableRubric
+            EditablePresenters = currentEditablePresenters
+            BulkPresentersText = currentBulk
             IsHfSyncing = false
             LastSyncedAt = Some DateTime.UtcNow
         }, saveLocal
