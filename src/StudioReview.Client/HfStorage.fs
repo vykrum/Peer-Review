@@ -351,57 +351,53 @@ module HfStorage =
                     let csvData = generateCsv state
                     let mdData = generateMarkdown state
 
-                    let operations =
-                        [
-                            {|
-                                operation = "addOrUpdate"
-                                path = "studio_state.json"
-                                content = Convert.ToBase64String(Encoding.UTF8.GetBytes(stateJson))
-                                encoding = "base64"
-                            |}
-                            {|
-                                operation = "addOrUpdate"
-                                path = "studio_reviews.csv"
-                                content = Convert.ToBase64String(Encoding.UTF8.GetBytes(csvData))
-                                encoding = "base64"
-                            |}
-                            {|
-                                operation = "addOrUpdate"
-                                path = "CRIT_REPORT.md"
-                                content = Convert.ToBase64String(Encoding.UTF8.GetBytes(mdData))
-                                encoding = "base64"
-                            |}
-                            {|
-                                operation = "addOrUpdate"
-                                path = "README.md"
-                                content =
-                                    let timeNow = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")
-                                    let readmeText =
-                                        "---\n" +
-                                        "title: Architecture Studio Peer Review Dataset\n" +
-                                        "tags:\n- architecture\n- peer-review\n- design-studio\n---\n" +
-                                        "# " + state.StudioName + "\n\n" +
-                                        "Live anonymous peer review data from the architecture studio critique.\n\n" +
-                                        "- Studio Code: `" + state.StudioCode + "`\n" +
-                                        "- Last Synced: " + timeNow + " UTC\n" +
-                                        "- Total Presenters: " + string state.Presenters.Length + "\n" +
-                                        "- Total Reviews: " + string state.Reviews.Length + "\n"
-                                    Convert.ToBase64String(Encoding.UTF8.GetBytes(readmeText))
-                                encoding = "base64"
-                            |}
-                        ]
+                    let timeNow = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")
+                    let readmeText =
+                        "---\n" +
+                        "title: Architecture Studio Peer Review Dataset\n" +
+                        "tags:\n- architecture\n- peer-review\n- design-studio\n---\n" +
+                        "# " + state.StudioName + "\n\n" +
+                        "Live anonymous peer review data from the architecture studio critique.\n\n" +
+                        "- Studio Code: `" + state.StudioCode + "`\n" +
+                        "- Last Synced: " + timeNow + " UTC\n" +
+                        "- Total Presenters: " + string state.Presenters.Length + "\n" +
+                        "- Total Reviews: " + string state.Reviews.Length + "\n"
 
-                    let payload =
-                        {|
-                            summary = $"Studio Peer Review update: {state.Reviews.Length} reviews recorded"
-                            description = "Automated commit from Bolero WASM Architecture Studio Peer Review Client"
-                            operations = operations
-                        |}
+                    let headerLine =
+                        let h =
+                            {|
+                                key = "header"
+                                value =
+                                    {|
+                                        summary = $"Studio Peer Review: {state.Reviews.Length} reviews recorded"
+                                        description = "Automated commit from Bolero WASM Architecture Studio Peer Review Client"
+                                    |}
+                            |}
+                        JsonSerializer.Serialize(h)
 
-                    let jsonBody = JsonSerializer.Serialize(payload)
+                    let makeFileLine (path: string) (contentBytes: byte[]) =
+                        let f =
+                            {|
+                                key = "file"
+                                value =
+                                    {|
+                                        content = Convert.ToBase64String(contentBytes)
+                                        path = path
+                                        encoding = "base64"
+                                    |}
+                            |}
+                        JsonSerializer.Serialize(f)
+
+                    let stateLine = makeFileLine "studio_state.json" (Encoding.UTF8.GetBytes(stateJson))
+                    let csvLine = makeFileLine "studio_reviews.csv" (Encoding.UTF8.GetBytes(csvData))
+                    let mdLine = makeFileLine "CRIT_REPORT.md" (Encoding.UTF8.GetBytes(mdData))
+                    let readmeLine = makeFileLine "README.md" (Encoding.UTF8.GetBytes(readmeText))
+
+                    let ndjsonPayload = String.concat "\n" [ headerLine; stateLine; csvLine; mdLine; readmeLine ]
+
                     use req = new HttpRequestMessage(HttpMethod.Post, commitUrl)
                     req.Headers.Authorization <- AuthenticationHeaderValue("Bearer", apiToken.Trim())
-                    req.Content <- new StringContent(jsonBody, Encoding.UTF8, "application/json")
+                    req.Content <- new StringContent(ndjsonPayload, Encoding.UTF8, "application/x-ndjson")
 
                     let! resp = http.SendAsync(req) |> Async.AwaitTask
                     if resp.IsSuccessStatusCode then
