@@ -405,3 +405,73 @@ module HfStorage =
                 with ex ->
                     return Error $"Commit failed: {ex.Message}"
         }
+
+    /// Fetches latest state from Hugging Face, appends/merges the student's review, and pushes the combined state
+    let submitReviewAndSync (http: HttpClient) (repoId: string) (apiToken: string) (newReview: Review) (localStudio: StudioState) : Async<Result<StudioState, string>> =
+        async {
+            if String.IsNullOrWhiteSpace(repoId) || String.IsNullOrWhiteSpace(apiToken) then
+                // If HF is not configured, just return local state
+                return Ok localStudio
+            else
+                try
+                    let! remoteRes = fetchFromHuggingFace http repoId (Some apiToken)
+                    let baseState =
+                        match remoteRes with
+                        | Ok rem -> rem
+                        | Error _ -> localStudio
+
+                    // Merge review: remove any prior review by this reviewer for this presenter, then prepend new review
+                    let mergedReviews =
+                        newReview :: (baseState.Reviews |> List.filter (fun r -> not (r.ReviewerToken = newReview.ReviewerToken && r.PresenterId = newReview.PresenterId)))
+
+                    let updatedState =
+                        { baseState with
+                            Reviews = mergedReviews
+                            LastUpdated = DateTime.UtcNow
+                            // Preserve active presenter from remote if available
+                            ActivePresenterId = match baseState.ActivePresenterId with Some _ as p -> p | None -> localStudio.ActivePresenterId
+                        }
+
+                    let! commitRes = commitToHuggingFace http repoId apiToken updatedState
+                    match commitRes with
+                    | Ok _ -> return Ok updatedState
+                    | Error err -> return Error err
+                with ex ->
+                    return Error ex.Message
+        }
+
+    /// Generate shareable student link containing encoded HF sync parameters
+    let generateShareableStudentLink (baseUrl: string) (repoId: string) (token: string) : string =
+        let rawBase = if baseUrl.EndsWith("/") then baseUrl else baseUrl + "/"
+        let cleanBase =
+            if rawBase.EndsWith("/admin/") then rawBase.Substring(0, rawBase.Length - 6)
+            elif rawBase.EndsWith("/admin") then rawBase.Substring(0, rawBase.Length - 5) + "/"
+            else rawBase
+        let cleanRepo = repoId.Trim().Trim('/')
+        let payload = {| repo = cleanRepo; token = token.Trim() |}
+        let json = JsonSerializer.Serialize(payload)
+        let b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
+        let encoded = Uri.EscapeDataString(b64)
+        $"{cleanBase}?sync={encoded}"
+
+    /// Parse sync parameter JSON from URL
+    let parseSyncParam (syncJson: string) : HuggingFaceConfig option =
+        if String.IsNullOrWhiteSpace(syncJson) then None
+        else
+            try
+                use doc = JsonDocument.Parse(syncJson)
+                let root = doc.RootElement
+                let repo = root.GetProperty("repo").GetString()
+                let token = root.GetProperty("token").GetString()
+                if not (String.IsNullOrWhiteSpace repo) && not (String.IsNullOrWhiteSpace token) then
+                    Some
+                        {
+                            RepoId = repo.Trim()
+                            ApiToken = token.Trim()
+                            AutoSync = true
+                            LastSyncTime = None
+                            LastSyncStatus = Some "Connected via 1-Click Link"
+                        }
+                else None
+            with _ -> None
+

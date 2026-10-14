@@ -56,6 +56,11 @@ type Model =
         HfTokenInput: string
         IsHfSyncing: bool
 
+        // Cloud sync & live multi-student aggregation
+        BaseUrl: string
+        IsAutoPollingEnabled: bool
+        LastSyncedAt: DateTime option
+
         // User feedback banners
         SuccessAlert: string option
         ErrorAlert: string option
@@ -99,6 +104,10 @@ let initModel : Model =
         HfTokenInput = ""
         IsHfSyncing = false
 
+        BaseUrl = ""
+        IsAutoPollingEnabled = true
+        LastSyncedAt = None
+
         SuccessAlert = None
         ErrorAlert = None
         InfoAlert = None
@@ -118,6 +127,7 @@ type Message =
     | SetStrengths of string
     | SetImprovements of string
     | SubmitReview
+    | SubmitReviewSyncResult of Result<StudioState, string>
     | SetAdminKeyInput of string
     | UnlockAdmin
     | LockAdmin
@@ -147,6 +157,11 @@ type Message =
     | GotHfFetchResult of Result<StudioState, string>
     | ResetAllReviews
     | ClearAlerts
+    | SetBaseUrl of string
+    | GotSyncParam of string
+    | CopyStudentLink of string
+    | PollLiveState
+    | ToggleAutoPolling
     | OnException of exn
 
 let getReviewerInfoAsync (js: IJSRuntime) =
@@ -353,13 +368,33 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                 let saveCmd = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
                 let scrollCmd = Cmd.OfAsync.attempt (fun () -> scrollToTopAsync js) () OnException
 
-                let hfCmd =
+                let syncCmd =
                     match updatedStudio.HfConfig with
-                    | Some cfg when cfg.AutoSync && not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
-                        Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cfg.RepoId cfg.ApiToken updatedStudio) () GotHfSyncResult OnException
+                    | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
+                        Cmd.OfAsync.either
+                            (fun () -> HfStorage.submitReviewAndSync http cfg.RepoId cfg.ApiToken newReview updatedStudio)
+                            ()
+                            SubmitReviewSyncResult
+                            OnException
                     | _ -> Cmd.none
 
-                nextModel, Cmd.batch [ saveCmd; scrollCmd; hfCmd ]
+                nextModel, Cmd.batch [ saveCmd; scrollCmd; syncCmd ]
+
+    | SubmitReviewSyncResult result ->
+        match result with
+        | Ok syncedState ->
+            let saveCmd = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js syncedState) () OnException
+            { model with
+                Studio = syncedState
+                IsSubmittingReview = false
+                LastSyncedAt = Some DateTime.UtcNow
+                SuccessAlert = Some "✓ Peer review saved and aggregated live to studio Hugging Face dataset!"
+            }, saveCmd
+        | Error err ->
+            { model with
+                IsSubmittingReview = false
+                ErrorAlert = Some ("Review recorded locally. (Cloud sync notice: " + err + ")")
+            }, Cmd.none
 
     // Admin Handlers
     | SetAdminKeyInput key ->
@@ -569,19 +604,79 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
             |> List.map (fun p -> p.Name + " - " + p.ProjectTitle)
             |> String.concat "\n"
 
-        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js remoteState) () OnException
+        // Merge reviews: keep local reviewer's own reviews, combine with all remote reviews
+        let myReviews = model.Studio.Reviews |> List.filter (fun r -> r.ReviewerToken = model.ReviewerToken)
+        let otherReviews = remoteState.Reviews |> List.filter (fun r -> not (r.ReviewerToken = model.ReviewerToken))
+        let mergedReviews = myReviews @ otherReviews
+
+        let mergedStudio =
+            { remoteState with
+                Reviews = mergedReviews
+                HfConfig = match model.Studio.HfConfig with Some _ as c -> c | None -> remoteState.HfConfig
+                LastUpdated = DateTime.UtcNow
+            }
+
+        let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js mergedStudio) () OnException
         { model with
-            Studio = remoteState
-            EditableRubric = remoteState.Rubric
-            EditablePresenters = remoteState.Presenters
+            Studio = mergedStudio
+            EditableRubric = mergedStudio.Rubric
+            EditablePresenters = mergedStudio.Presenters
             BulkPresentersText = bulk
             IsHfSyncing = false
-            SuccessAlert = Some ("Successfully loaded studio state from Hugging Face! (" + string remoteState.Presenters.Length + " presenters, " + string remoteState.Reviews.Length + " reviews).")
-            InfoAlert = None
+            LastSyncedAt = Some DateTime.UtcNow
         }, saveLocal
 
     | GotHfFetchResult (Error err) ->
         { model with IsHfSyncing = false; ErrorAlert = Some err; InfoAlert = None }, Cmd.none
+
+    | SetBaseUrl url ->
+        { model with BaseUrl = url }, Cmd.none
+
+    | GotSyncParam syncJson ->
+        match HfStorage.parseSyncParam syncJson with
+        | Some cfg ->
+            let updatedStudio = { model.Studio with HfConfig = Some cfg }
+            let saveCmd = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+            let cleanUrlCmd = Cmd.OfAsync.attempt (fun () -> async { do! js.InvokeVoidAsync("studioReview.cleanSyncUrl").AsTask() |> Async.AwaitTask }) () OnException
+            let fetchCmd = Cmd.OfAsync.either (fun () -> HfStorage.fetchFromHuggingFace http cfg.RepoId (Some cfg.ApiToken)) () GotHfFetchResult OnException
+            { model with
+                Studio = updatedStudio
+                HfRepoInput = cfg.RepoId
+                HfTokenInput = cfg.ApiToken
+                SuccessAlert = Some "🟢 Studio Cloud Sync connected! You are now live with the jury stage."
+            }, Cmd.batch [ saveCmd; cleanUrlCmd; fetchCmd ]
+        | None -> model, Cmd.none
+
+    | CopyStudentLink link ->
+        let copyCmd = Cmd.OfAsync.attempt (fun () -> async { do! js.InvokeVoidAsync("studioReview.copyToClipboard", link).AsTask() |> Async.AwaitTask }) () OnException
+        { model with SuccessAlert = Some "📋 Student studio link copied to clipboard! Share this link or QR code with your class." }, copyCmd
+
+    | PollLiveState ->
+        let pollDelayCmd =
+            if model.IsAutoPollingEnabled then
+                Cmd.OfAsync.either
+                    (fun () -> async { do! Async.Sleep 12000 })
+                    ()
+                    (fun () -> PollLiveState)
+                    OnException
+            else Cmd.none
+
+        match model.Studio.HfConfig with
+        | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
+            let fetchCmd =
+                Cmd.OfAsync.either
+                    (fun () -> HfStorage.fetchFromHuggingFace http cfg.RepoId (Some cfg.ApiToken))
+                    ()
+                    GotHfFetchResult
+                    OnException
+            model, Cmd.batch [ fetchCmd; pollDelayCmd ]
+        | _ ->
+            model, pollDelayCmd
+
+    | ToggleAutoPolling ->
+        let next = not model.IsAutoPollingEnabled
+        let cmd = if next then Cmd.ofMsg PollLiveState else Cmd.none
+        { model with IsAutoPollingEnabled = next }, cmd
 
     | ResetAllReviews ->
         let updatedStudio = { model.Studio with Reviews = []; LastUpdated = DateTime.UtcNow }
@@ -1142,7 +1237,14 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
                     }
 
                     div {
-                        attr.style "display: flex; gap: 0.5rem;"
+                        attr.style "display: flex; gap: 0.5rem; align-items: center;"
+                        button {
+                            attr.``class`` "btn-admin"
+                            attr.style "border-color: var(--accent-cyan); color: var(--accent-cyan); font-weight: 600;"
+                            attr.disabled model.IsHfSyncing
+                            on.click (fun _ -> dispatch FetchFromHuggingFace)
+                            text (if model.IsHfSyncing then "⏳ Syncing..." else "🔄 Pull Live Grades")
+                        }
                         button {
                             attr.``class`` "btn-admin"
                             on.click (fun _ -> dispatch ExportCsv)
@@ -1468,26 +1570,81 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
             }
 
         | SubTabHuggingFace ->
+            let hasConfig =
+                not (String.IsNullOrWhiteSpace model.HfRepoInput) && not (String.IsNullOrWhiteSpace model.HfTokenInput)
+            let studentShareLink =
+                if hasConfig then
+                    let cleanBase = if String.IsNullOrWhiteSpace model.BaseUrl then "http://localhost:5098/" else model.BaseUrl
+                    HfStorage.generateShareableStudentLink cleanBase model.HfRepoInput model.HfTokenInput
+                else ""
+
             div {
                 div {
-                    attr.style "max-width: 640px; margin: 0 auto; padding: 1rem 0;"
+                    attr.style "max-width: 680px; margin: 0 auto; padding: 1rem 0;"
                     div {
                         attr.style "text-align: center; margin-bottom: 2rem;"
                         div { attr.style "font-size: 3rem; margin-bottom: 0.5rem;"; text "🤗" }
-                        h3 { attr.style "font-family: var(--font-display); font-size: 1.4rem;"; text "Hugging Face Dataset Storage & Retrieval" }
-                        p { attr.style "color: var(--text-muted); font-size: 0.88rem; margin-top: 0.35rem;"; text "Store and retrieve studio critiques serverless via Hugging Face Hub Datasets REST API." }
+                        h3 { attr.style "font-family: var(--font-display); font-size: 1.4rem;"; text "Hugging Face Dataset Storage & Live Aggregation" }
+                        p { attr.style "color: var(--text-muted); font-size: 0.88rem; margin-top: 0.35rem;"; text "Store, retrieve, and automatically aggregate student reviews in real time using Hugging Face Datasets." }
                     }
+
+                    cond hasConfig <| function
+                        | true ->
+                            div {
+                                attr.style "background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.9) 100%); border: 1px solid var(--accent-cyan); border-radius: var(--radius-md); padding: 1.5rem; margin-bottom: 2rem; box-shadow: 0 8px 32px rgba(6, 182, 212, 0.15);"
+
+                                div {
+                                    attr.style "display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;"
+                                    h4 { attr.style "font-family: var(--font-display); font-size: 1.15rem; color: var(--accent-cyan); margin: 0;"; text "📱 1-Click Shareable Link for Studio Cohort" }
+                                    span { attr.``class`` "stage-pill"; text "🟢 Live Cloud Sync" }
+                                }
+
+                                p { attr.style "color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; margin-bottom: 1.25rem;"; text "Share this link with your 20–40 students or display the QR code on the projector. When students open it on their phones, their devices automatically link to this Hugging Face dataset and their grades pool together live!" }
+
+                                div {
+                                    attr.style "display: flex; gap: 0.5rem; margin-bottom: 1.25rem;"
+                                    input {
+                                        attr.``class`` "input-studio"
+                                        attr.style "font-family: var(--font-mono); font-size: 0.8rem; background: rgba(0,0,0,0.5);"
+                                        attr.readonly "readonly"
+                                        attr.value studentShareLink
+                                    }
+                                    button {
+                                        attr.``class`` "btn-primary"
+                                        attr.style "white-space: nowrap; padding: 0.5rem 1.1rem;"
+                                        on.click (fun _ -> dispatch (CopyStudentLink studentShareLink))
+                                        text "📋 Copy Link"
+                                    }
+                                }
+
+                                div {
+                                    attr.style "display: flex; flex-direction: column; align-items: center; padding: 1.25rem; background: rgba(0,0,0,0.3); border-radius: var(--radius-sm);"
+                                    div {
+                                        attr.style "background: #ffffff; padding: 12px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"
+                                        img {
+                                            attr.src ($"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={Uri.EscapeDataString studentShareLink}")
+                                            attr.alt "Scan to Join Studio Peer Critique"
+                                            attr.style "width: 180px; height: 180px; display: block;"
+                                        }
+                                    }
+                                    span {
+                                        attr.style "font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-dim); margin-top: 0.75rem;"
+                                        text "📷 Project on screen: Students scan with phone camera to crit"
+                                    }
+                                }
+                            }
+                        | false -> empty()
 
                     div {
                         attr.style "background: rgba(21, 28, 44, 0.4); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 1.5rem; margin-bottom: 1.5rem;"
 
                         div {
                             attr.style "margin-bottom: 1.25rem;"
-                            label { attr.``class`` "form-label"; text "Hugging Face Dataset Repo ID (e.g. username/studio-peer-reviews):" }
+                            label { attr.``class`` "form-label"; text "Hugging Face Dataset Repo ID (e.g. username/Peer-Review):" }
                             input {
                                 attr.``class`` "input-studio"
                                 attr.``type`` "text"
-                                attr.placeholder "your-hf-username/arch-studio-critique"
+                                attr.placeholder "vykrum/Peer-Review"
                                 attr.value model.HfRepoInput
                                 on.input (fun e -> dispatch (SetHfRepoInput (string e.Value)))
                             }
@@ -1495,7 +1652,7 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
 
                         div {
                             attr.style "margin-bottom: 1.5rem;"
-                            label { attr.``class`` "form-label"; text "Hugging Face API Token (with 'Write' permission to push):" }
+                            label { attr.``class`` "form-label"; text "Hugging Face Write Token:" }
                             input {
                                 attr.``class`` "input-studio"
                                 attr.``type`` "password"
@@ -1503,7 +1660,7 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
                                 attr.value model.HfTokenInput
                                 on.input (fun e -> dispatch (SetHfTokenInput (string e.Value)))
                             }
-                            p { attr.style "font-size: 0.72rem; color: var(--text-dim); margin-top: 0.3rem;"; text "Create a free token at huggingface.co/settings/tokens. Only stored in your browser." }
+                            p { attr.style "font-size: 0.72rem; color: var(--text-dim); margin-top: 0.3rem;"; text "Create a free token with 'Write' permission at huggingface.co/settings/tokens. Only stored in your browser." }
                         }
 
                         div {
@@ -1518,7 +1675,7 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
                                 attr.``class`` "btn-primary"
                                 attr.disabled model.IsHfSyncing
                                 on.click (fun _ -> dispatch SyncToHuggingFace)
-                                text (if model.IsHfSyncing then "Syncing..." else "🚀 Push Dataset to HF")
+                                text (if model.IsHfSyncing then "Syncing..." else "🚀 Save & Connect Cloud Sync")
                             }
                         }
                     }
@@ -1577,6 +1734,9 @@ type MyApp() =
                 Cmd.batch [
                     Cmd.ofMsg LoadLocalState
                     Cmd.OfAsync.either (fun () -> getReviewerInfoAsync js) () (fun (t, n) -> InitReviewer (t, n)) OnException
+                    Cmd.OfAsync.either (fun () -> async { return! js.InvokeAsync<string>("studioReview.getBaseUrl").AsTask() |> Async.AwaitTask }) () SetBaseUrl OnException
+                    Cmd.OfAsync.either (fun () -> async { return! js.InvokeAsync<string>("studioReview.getSyncParam").AsTask() |> Async.AwaitTask }) () GotSyncParam OnException
+                    Cmd.ofMsg PollLiveState
                 ]
             initModel, cmd
 
