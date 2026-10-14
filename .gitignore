@@ -1,0 +1,24 @@
+# Build and publish outputs
+bin/
+obj/
+dist/
+output/
+_framework/
+
+# User-specific / IDE files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temp files
+*.log
+*.tmp

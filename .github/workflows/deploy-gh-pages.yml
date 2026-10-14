@@ -1,0 +1,48 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish WASM App
+        run: dotnet publish src/StudioReview.Client/StudioReview.Client.fsproj -c Release -o output
+
+      - name: Configure SPA Routing for GitHub Pages
+        run: |
+          cp output/wwwroot/index.html output/wwwroot/404.html
+          sed -i 's|<base href="/" />|<base href="/${{ github.event.repository.name }}/" />|g' output/wwwroot/index.html
+          sed -i 's|<base href="/" />|<base href="/${{ github.event.repository.name }}/" />|g' output/wwwroot/404.html
+
+      - name: Upload GitHub Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: output/wwwroot
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
