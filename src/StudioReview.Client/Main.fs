@@ -637,11 +637,14 @@ let viewHeader (model: Model) (dispatch: Message -> unit) =
                         attr.href (router.Link Page.Home)
                         text "🏛️ Studio Roster"
                     }
-                    a {
-                        attr.``class`` (if model.Page = Page.Admin then "tab-btn is-active" else "tab-btn")
-                        attr.href (router.Link Page.Admin)
-                        text "⚙️ Admin Console"
-                    }
+                    cond (model.Page = Page.Admin) <| function
+                        | true ->
+                            span {
+                                attr.``class`` "tab-btn is-active"
+                                attr.style "border-color: var(--accent-cyan); color: var(--accent-cyan);"
+                                text "🔒 Admin Mode"
+                            }
+                        | false -> empty()
                 }
             }
         }
