@@ -159,7 +159,9 @@ type Message =
     | ClearAlerts
     | SetBaseUrl of string
     | GotSyncParam of string
+    | GotAdminSyncParam of string
     | CopyStudentLink of string
+    | CopyAdminLink of string
     | PollLiveState
     | ToggleAutoPolling
     | OnException of exn
@@ -650,6 +652,27 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
     | CopyStudentLink link ->
         let copyCmd = Cmd.OfAsync.attempt (fun () -> async { do! js.InvokeVoidAsync("studioReview.copyToClipboard", link).AsTask() |> Async.AwaitTask }) () OnException
         { model with SuccessAlert = Some "📋 Student studio link copied to clipboard! Share this link or QR code with your class." }, copyCmd
+
+    | GotAdminSyncParam syncJson ->
+        match HfStorage.parseSyncParam syncJson with
+        | Some cfg ->
+            let updatedStudio = { model.Studio with HfConfig = Some cfg }
+            let saveCmd = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+            let cleanUrlCmd = Cmd.OfAsync.attempt (fun () -> async { do! js.InvokeVoidAsync("studioReview.cleanSyncUrl").AsTask() |> Async.AwaitTask }) () OnException
+            let fetchCmd = Cmd.OfAsync.either (fun () -> HfStorage.fetchFromHuggingFace http cfg.RepoId (Some cfg.ApiToken)) () GotHfFetchResult OnException
+            { model with
+                Studio = updatedStudio
+                HfRepoInput = cfg.RepoId
+                HfTokenInput = cfg.ApiToken
+                IsAdminUnlocked = true
+                Page = Page.Admin
+                SuccessAlert = Some "🔑 Admin Console unlocked & connected to Hugging Face dataset on this device!"
+            }, Cmd.batch [ saveCmd; cleanUrlCmd; fetchCmd ]
+        | None -> model, Cmd.none
+
+    | CopyAdminLink link ->
+        let copyCmd = Cmd.OfAsync.attempt (fun () -> async { do! js.InvokeVoidAsync("studioReview.copyToClipboard", link).AsTask() |> Async.AwaitTask }) () OnException
+        { model with SuccessAlert = Some "🔑 Private Faculty Admin Link copied to clipboard! Bookmark or send it to your mobile." }, copyCmd
 
     | PollLiveState ->
         let pollDelayCmd =
@@ -1572,10 +1595,14 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
         | SubTabHuggingFace ->
             let hasConfig =
                 not (String.IsNullOrWhiteSpace model.HfRepoInput) && not (String.IsNullOrWhiteSpace model.HfTokenInput)
+            let cleanBase = if String.IsNullOrWhiteSpace model.BaseUrl then "http://localhost:5098/" else model.BaseUrl
             let studentShareLink =
                 if hasConfig then
-                    let cleanBase = if String.IsNullOrWhiteSpace model.BaseUrl then "http://localhost:5098/" else model.BaseUrl
                     HfStorage.generateShareableStudentLink cleanBase model.HfRepoInput model.HfTokenInput
+                else ""
+            let adminShareLink =
+                if hasConfig then
+                    HfStorage.generateShareableAdminLink cleanBase model.HfRepoInput model.HfTokenInput
                 else ""
 
             div {
@@ -1591,45 +1618,93 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
                     cond hasConfig <| function
                         | true ->
                             div {
-                                attr.style "background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.9) 100%); border: 1px solid var(--accent-cyan); border-radius: var(--radius-md); padding: 1.5rem; margin-bottom: 2rem; box-shadow: 0 8px 32px rgba(6, 182, 212, 0.15);"
-
+                                // 1. Student Cohort Link Card
                                 div {
-                                    attr.style "display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;"
-                                    h4 { attr.style "font-family: var(--font-display); font-size: 1.15rem; color: var(--accent-cyan); margin: 0;"; text "📱 1-Click Shareable Link for Studio Cohort" }
-                                    span { attr.``class`` "stage-pill"; text "🟢 Live Cloud Sync" }
-                                }
+                                    attr.style "background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.9) 100%); border: 1px solid var(--accent-cyan); border-radius: var(--radius-md); padding: 1.5rem; margin-bottom: 2rem; box-shadow: 0 8px 32px rgba(6, 182, 212, 0.15);"
 
-                                p { attr.style "color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; margin-bottom: 1.25rem;"; text "Share this link with your 20–40 students or display the QR code on the projector. When students open it on their phones, their devices automatically link to this Hugging Face dataset and their grades pool together live!" }
-
-                                div {
-                                    attr.style "display: flex; gap: 0.5rem; margin-bottom: 1.25rem;"
-                                    input {
-                                        attr.``class`` "input-studio"
-                                        attr.style "font-family: var(--font-mono); font-size: 0.8rem; background: rgba(0,0,0,0.5);"
-                                        attr.readonly "readonly"
-                                        attr.value studentShareLink
-                                    }
-                                    button {
-                                        attr.``class`` "btn-primary"
-                                        attr.style "white-space: nowrap; padding: 0.5rem 1.1rem;"
-                                        on.click (fun _ -> dispatch (CopyStudentLink studentShareLink))
-                                        text "📋 Copy Link"
-                                    }
-                                }
-
-                                div {
-                                    attr.style "display: flex; flex-direction: column; align-items: center; padding: 1.25rem; background: rgba(0,0,0,0.3); border-radius: var(--radius-sm);"
                                     div {
-                                        attr.style "background: #ffffff; padding: 12px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"
-                                        img {
-                                            attr.src ($"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={Uri.EscapeDataString studentShareLink}")
-                                            attr.alt "Scan to Join Studio Peer Critique"
-                                            attr.style "width: 180px; height: 180px; display: block;"
+                                        attr.style "display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;"
+                                        h4 { attr.style "font-family: var(--font-display); font-size: 1.15rem; color: var(--accent-cyan); margin: 0;"; text "📱 1-Click Shareable Link for Students" }
+                                        span { attr.``class`` "stage-pill"; text "🟢 Student Peer Portal" }
+                                    }
+
+                                    p { attr.style "color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; margin-bottom: 1.25rem;"; text "Share this link with your 20–40 students or project the QR code on the wall. When students open it on their phones, their devices automatically link to this dataset and their grades pool together live!" }
+
+                                    div {
+                                        attr.style "display: flex; gap: 0.5rem; margin-bottom: 1.25rem;"
+                                        input {
+                                            attr.``class`` "input-studio"
+                                            attr.style "font-family: var(--font-mono); font-size: 0.8rem; background: rgba(0,0,0,0.5);"
+                                            attr.readonly "readonly"
+                                            attr.value studentShareLink
+                                        }
+                                        button {
+                                            attr.``class`` "btn-primary"
+                                            attr.style "white-space: nowrap; padding: 0.5rem 1.1rem;"
+                                            on.click (fun _ -> dispatch (CopyStudentLink studentShareLink))
+                                            text "📋 Copy Link"
                                         }
                                     }
-                                    span {
-                                        attr.style "font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-dim); margin-top: 0.75rem;"
-                                        text "📷 Project on screen: Students scan with phone camera to crit"
+
+                                    div {
+                                        attr.style "display: flex; flex-direction: column; align-items: center; padding: 1.25rem; background: rgba(0,0,0,0.3); border-radius: var(--radius-sm);"
+                                        div {
+                                            attr.style "background: #ffffff; padding: 12px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"
+                                            img {
+                                                attr.src ($"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={Uri.EscapeDataString studentShareLink}")
+                                                attr.alt "Scan to Join Studio Peer Critique"
+                                                attr.style "width: 180px; height: 180px; display: block;"
+                                            }
+                                        }
+                                        span {
+                                            attr.style "font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-dim); margin-top: 0.75rem;"
+                                            text "📷 Project on screen: Students scan with phone camera to crit"
+                                        }
+                                    }
+                                }
+
+                                // 2. Faculty Private Admin Mobile Link Card
+                                div {
+                                    attr.style "background: linear-gradient(135deg, rgba(30, 27, 75, 0.6) 0%, rgba(15, 23, 42, 0.9) 100%); border: 1px solid var(--accent-amber); border-radius: var(--radius-md); padding: 1.5rem; margin-bottom: 2rem; box-shadow: 0 8px 32px rgba(245, 158, 11, 0.12);"
+
+                                    div {
+                                        attr.style "display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;"
+                                        h4 { attr.style "font-family: var(--font-display); font-size: 1.15rem; color: var(--accent-amber); margin: 0;"; text "🔑 Private Faculty Admin Shortcut (Mobile & Anywhere)" }
+                                        span { attr.``class`` "stage-pill"; attr.style "border-color: var(--accent-amber); color: var(--accent-amber);"; text "🔒 Safe From Hugging Face Scanners" }
+                                    }
+
+                                    p { attr.style "color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; margin-bottom: 1.25rem;"; text "Scan this QR code with your phone camera (or bookmark the link). It opens /admin already unlocked and permanently connected on your phone. Because it uses a client-side URL hash (#), the token is NEVER sent over the internet or committed to GitHub—keeping your Hugging Face token completely safe!" }
+
+                                    div {
+                                        attr.style "display: flex; gap: 0.5rem; margin-bottom: 1.25rem;"
+                                        input {
+                                            attr.``class`` "input-studio"
+                                            attr.style "font-family: var(--font-mono); font-size: 0.8rem; background: rgba(0,0,0,0.5);"
+                                            attr.readonly "readonly"
+                                            attr.value adminShareLink
+                                        }
+                                        button {
+                                            attr.``class`` "btn-admin"
+                                            attr.style "white-space: nowrap; padding: 0.5rem 1.1rem; border-color: var(--accent-amber); color: var(--accent-amber);"
+                                            on.click (fun _ -> dispatch (CopyAdminLink adminShareLink))
+                                            text "📋 Copy Admin Link"
+                                        }
+                                    }
+
+                                    div {
+                                        attr.style "display: flex; flex-direction: column; align-items: center; padding: 1.25rem; background: rgba(0,0,0,0.3); border-radius: var(--radius-sm);"
+                                        div {
+                                            attr.style "background: #ffffff; padding: 12px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"
+                                            img {
+                                                attr.src ($"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={Uri.EscapeDataString adminShareLink}")
+                                                attr.alt "Scan to Open Private Faculty Console on Mobile"
+                                                attr.style "width: 180px; height: 180px; display: block;"
+                                            }
+                                        }
+                                        span {
+                                            attr.style "font-family: var(--font-mono); font-size: 0.78rem; color: var(--accent-amber); margin-top: 0.75rem;"
+                                            text "📱 Point your phone camera here to control studio admin on mobile"
+                                        }
                                     }
                                 }
                             }
@@ -1736,6 +1811,7 @@ type MyApp() =
                     Cmd.OfAsync.either (fun () -> getReviewerInfoAsync js) () (fun (t, n) -> InitReviewer (t, n)) OnException
                     Cmd.OfAsync.either (fun () -> async { return! js.InvokeAsync<string>("studioReview.getBaseUrl").AsTask() |> Async.AwaitTask }) () SetBaseUrl OnException
                     Cmd.OfAsync.either (fun () -> async { return! js.InvokeAsync<string>("studioReview.getSyncParam").AsTask() |> Async.AwaitTask }) () GotSyncParam OnException
+                    Cmd.OfAsync.either (fun () -> async { return! js.InvokeAsync<string>("studioReview.getAdminSyncParam").AsTask() |> Async.AwaitTask }) () GotAdminSyncParam OnException
                     Cmd.ofMsg PollLiveState
                 ]
             initModel, cmd

@@ -462,6 +462,20 @@ module HfStorage =
         let encoded = Uri.EscapeDataString(b64)
         $"{cleanBase}?sync={encoded}"
 
+    /// Generate shareable faculty admin link containing encoded HF sync parameters in URL hash fragment
+    let generateShareableAdminLink (baseUrl: string) (repoId: string) (token: string) : string =
+        let rawBase = if baseUrl.EndsWith("/") then baseUrl else baseUrl + "/"
+        let cleanBase =
+            if rawBase.EndsWith("/admin/") then rawBase
+            elif rawBase.EndsWith("/admin") then rawBase + "/"
+            else rawBase + "admin"
+        let cleanRepo = repoId.Trim().Trim('/')
+        let payload = {| repo = cleanRepo; token = token.Trim() |}
+        let json = JsonSerializer.Serialize(payload)
+        let b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
+        let encoded = Uri.EscapeDataString(b64)
+        $"{cleanBase}#admin_sync={encoded}"
+
     /// Parse sync parameter JSON from URL
     let parseSyncParam (syncJson: string) : HuggingFaceConfig option =
         if String.IsNullOrWhiteSpace(syncJson) then None

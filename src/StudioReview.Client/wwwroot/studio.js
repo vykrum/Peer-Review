@@ -96,6 +96,28 @@ window.studioReview = {
         return "";
     },
 
+    getAdminSyncParam: function() {
+        try {
+            var syncVal = null;
+            if (window.location.hash) {
+                var hash = window.location.hash.substring(1);
+                var hashParams = new URLSearchParams(hash);
+                syncVal = hashParams.get("admin_sync");
+            }
+            if (!syncVal) {
+                var searchParams = new URLSearchParams(window.location.search);
+                syncVal = searchParams.get("admin_sync");
+            }
+            if (syncVal) {
+                var decoded = decodeURIComponent(escape(atob(syncVal)));
+                return decoded;
+            }
+        } catch (e) {
+            console.warn("Could not parse admin_sync parameter:", e);
+        }
+        return "";
+    },
+
     cleanSyncUrl: function() {
         try {
             var cleanUrl = window.location.origin + window.location.pathname;
