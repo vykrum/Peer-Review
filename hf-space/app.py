@@ -9,15 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import gradio as gr
 from huggingface_hub import HfApi, CommitOperationAdd
-
-# ZeroGPU compatibility handler
-try:
-    import spaces
-    @spaces.GPU
-    def gpu_init():
-        return "ZeroGPU Initialized"
-except Exception:
-    pass
+import spaces
 
 # Configuration
 REPO_ID = os.environ.get("HF_DATASET_REPO", "vykrum/peer-review")
@@ -236,12 +228,15 @@ with gr.Blocks(title="Studio Crit Sync Status") as demo:
         
     refresh_btn = gr.Button("🔄 Refresh Status")
     
+    @spaces.GPU
     def refresh_ui():
         has_t = bool(HF_TOKEN or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
         revs = len(CURRENT_STATE.get("Reviews", [])) if CURRENT_STATE else 0
         return f"🟢 Online | {revs} reviews tracked", "✅ Valid" if has_t else "⚠️ Set HF_TOKEN in Space Settings"
         
     refresh_btn.click(fn=refresh_ui, outputs=[status_box, token_status])
+    demo.load(fn=refresh_ui, outputs=[status_box, token_status])
+
 app = gr.mount_gradio_app(app, demo, path="/")
 
 if __name__ == "__main__":
