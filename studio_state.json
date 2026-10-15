@@ -1,0 +1,64 @@
+{
+  "StudioName": "ARCH 401: Advanced Spatial Design Studio",
+  "StudioCode": "STUDIO-CRIT-WASM",
+  "ActivePresenterId": "pres_1",
+  "Presenters": [
+    { "Id": "pres_1", "Name": "Liam Vance", "ProjectTitle": "Mass-Timber Urban Infill & Civic Archive", "Order": 1 },
+    { "Id": "pres_2", "Name": "Maya Lin-Davies", "ProjectTitle": "Geothermal Subterranean Bathhouse", "Order": 2 },
+    { "Id": "pres_3", "Name": "Marcus Zhao", "ProjectTitle": "Kinetic Tidal Research Station & Pier", "Order": 3 },
+    { "Id": "pres_4", "Name": "Elena Rostova", "ProjectTitle": "Post-Industrial Ceramic Arts Guild", "Order": 4 },
+    { "Id": "pres_5", "Name": "Kai Tanaka", "ProjectTitle": "Adaptive CLT Housing Cooperative", "Order": 5 },
+    { "Id": "pres_6", "Name": "Priya Patel", "ProjectTitle": "Mycelium Biomaterial Fabrication Lab", "Order": 6 },
+    { "Id": "pres_7", "Name": "Jordan Hayes", "ProjectTitle": "Floating Wetland Climate Observatory", "Order": 7 },
+    { "Id": "pres_8", "Name": "Chloe Dubois", "ProjectTitle": "Monolithic Rammed-Earth Winery", "Order": 8 },
+    { "Id": "pres_9", "Name": "Mateo Silva", "ProjectTitle": "Urban Micro-Mobility Interchange Canopy", "Order": 9 },
+    { "Id": "pres_10", "Name": "Amara Okafor", "ProjectTitle": "Afro-Futurist Cultural Exchange Courtyard", "Order": 10 },
+    { "Id": "pres_11", "Name": "Soren Lindqvist", "ProjectTitle": "Arctic Permafrost Field Station", "Order": 11 },
+    { "Id": "pres_12", "Name": "Aisha Al-Mansoor", "ProjectTitle": "Wind-Tower Passive Cooling Institute", "Order": 12 },
+    { "Id": "pres_13", "Name": "Felix Berg", "ProjectTitle": "Tensile Cloud Botany Conservatory", "Order": 13 },
+    { "Id": "pres_14", "Name": "Zara Qureshi", "ProjectTitle": "Waterfront Acoustic Performance Vessel", "Order": 14 },
+    { "Id": "pres_15", "Name": "Julian Vance", "ProjectTitle": "Vertical Aeroponic Farm & Market", "Order": 15 },
+    { "Id": "pres_16", "Name": "Hana Mori", "ProjectTitle": "Modular Bamboo Disaster Resilience Pods", "Order": 16 },
+    { "Id": "pres_17", "Name": "Lucas Rossi", "ProjectTitle": "Canal Ecological Remediation Center", "Order": 17 },
+    { "Id": "pres_18", "Name": "Freja Møller", "ProjectTitle": "Circular Economy Timber Mill & Workshop", "Order": 18 }
+  ],
+  "Rubric": [
+    {
+      "Id": "crit_concept",
+      "Title": "1. Concept & Contextual Premise",
+      "Description": "Clarity of theoretical stance, urban/landscape dialogue, and architectural diagram.",
+      "MaxScore": 25,
+      "Weight": 1.0
+    },
+    {
+      "Id": "crit_spatial",
+      "Title": "2. Spatial Experience & Program Flow",
+      "Description": "Sectional choreography, natural daylighting, proportion, and programmatic hierarchy.",
+      "MaxScore": 25,
+      "Weight": 1.0
+    },
+    {
+      "Id": "crit_tectonics",
+      "Title": "3. Tectonics, Materiality & Climate Systems",
+      "Description": "Structural logic, envelope articulation, passive environmental strategies, and detail.",
+      "MaxScore": 25,
+      "Weight": 1.0
+    },
+    {
+      "Id": "crit_craft",
+      "Title": "4. Drawing Craft, Models & Oral Defense",
+      "Description": "Precision of orthographic drawings, physical model craft, and response to jury questions.",
+      "MaxScore": 25,
+      "Weight": 1.0
+    }
+  ],
+  "Reviews": [],
+  "HfConfig": {
+    "RepoId": "vykrum/peer-review",
+    "ApiToken": "",
+    "AutoSync": true,
+    "LastSyncTime": null,
+    "LastSyncStatus": "Ready to connect"
+  },
+  "LastUpdated": "2026-10-14T18:00:00Z"
+}

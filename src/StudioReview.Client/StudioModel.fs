@@ -73,7 +73,7 @@ type PresenterSummary =
         ImprovementsList: string list
     }
 
-/// Hugging Face dataset configuration
+/// Hugging Face dataset and space backend configuration
 type HuggingFaceConfig =
     {
         RepoId: string
@@ -81,6 +81,7 @@ type HuggingFaceConfig =
         AutoSync: bool
         LastSyncTime: DateTime option
         LastSyncStatus: string option
+        SpaceUrl: string option
     }
 
 /// Complete studio state

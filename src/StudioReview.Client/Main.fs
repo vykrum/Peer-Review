@@ -52,6 +52,7 @@ type Model =
         EditableRubric: RubricCriterion list
         EditablePresenters: Presenter list
         BulkPresentersText: string
+        HfSpaceUrlInput: string
         HfRepoInput: string
         HfTokenInput: string
         IsHfSyncing: bool
@@ -100,6 +101,7 @@ let initModel : Model =
         EditableRubric = seed.Rubric
         EditablePresenters = seed.Presenters
         BulkPresentersText = bulk
+        HfSpaceUrlInput = "https://vykrum-peer-review-sync.hf.space"
         HfRepoInput = "vykrum/peer-review"
         HfTokenInput = ""
         IsHfSyncing = false
@@ -149,6 +151,7 @@ type Message =
     | SavePresenters
     | ExportCsv
     | ExportMarkdown
+    | SetHfSpaceUrlInput of string
     | SetHfRepoInput of string
     | SetHfTokenInput of string
     | SyncToHuggingFace
@@ -249,10 +252,13 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
             |> List.map (fun p -> p.Name + " - " + p.ProjectTitle)
             |> String.concat "\n"
 
-        let hfRepo, hfToken =
+        let hfRepo, hfToken, hfSpace =
             match loadedState.HfConfig with
-            | Some cfg -> (if String.IsNullOrWhiteSpace cfg.RepoId then "vykrum/peer-review" else cfg.RepoId), cfg.ApiToken
-            | None -> "vykrum/peer-review", ""
+            | Some cfg ->
+                let repo = if String.IsNullOrWhiteSpace cfg.RepoId then "vykrum/peer-review" else cfg.RepoId
+                let space = cfg.SpaceUrl |> Option.defaultValue "https://vykrum-peer-review-sync.hf.space"
+                repo, cfg.ApiToken, space
+            | None -> "vykrum/peer-review", "", "https://vykrum-peer-review-sync.hf.space"
 
         let nextModel =
             { model with
@@ -260,16 +266,20 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                 EditableRubric = loadedState.Rubric
                 EditablePresenters = loadedState.Presenters
                 BulkPresentersText = bulk
+                HfSpaceUrlInput = hfSpace
                 HfRepoInput = hfRepo
                 HfTokenInput = hfToken
                 IsLoading = false
             }
 
         let autoFetchCmd =
-            match loadedState.HfConfig with
-            | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) ->
-                Cmd.OfAsync.either (fun () -> HfStorage.fetchFromHuggingFace http cfg.RepoId (Some cfg.ApiToken)) () GotHfFetchResult OnException
-            | _ -> Cmd.none
+            if not (String.IsNullOrWhiteSpace hfSpace) then
+                Cmd.OfAsync.either (fun () -> HfStorage.fetchFromSpace http hfSpace) () GotHfFetchResult OnException
+            else
+                match loadedState.HfConfig with
+                | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) ->
+                    Cmd.OfAsync.either (fun () -> HfStorage.fetchFromHuggingFace http cfg.RepoId (Some cfg.ApiToken)) () GotHfFetchResult OnException
+                | _ -> Cmd.none
 
         nextModel, autoFetchCmd
 
@@ -371,14 +381,29 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                 let scrollCmd = Cmd.OfAsync.attempt (fun () -> scrollToTopAsync js) () OnException
 
                 let syncCmd =
-                    match updatedStudio.HfConfig with
-                    | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
+                    let spaceUrlOpt =
+                        match updatedStudio.HfConfig with
+                        | Some cfg when cfg.SpaceUrl.IsSome && not (String.IsNullOrWhiteSpace cfg.SpaceUrl.Value) -> cfg.SpaceUrl
+                        | _ ->
+                            if not (String.IsNullOrWhiteSpace model.HfSpaceUrlInput) then Some (model.HfSpaceUrlInput.Trim())
+                            else None
+
+                    match spaceUrlOpt with
+                    | Some spaceUrl ->
                         Cmd.OfAsync.either
-                            (fun () -> HfStorage.submitReviewAndSync http cfg.RepoId cfg.ApiToken newReview updatedStudio)
+                            (fun () -> HfStorage.submitReviewToSpace http spaceUrl newReview updatedStudio)
                             ()
                             SubmitReviewSyncResult
                             OnException
-                    | _ -> Cmd.none
+                    | None ->
+                        match updatedStudio.HfConfig with
+                        | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
+                            Cmd.OfAsync.either
+                                (fun () -> HfStorage.submitReviewAndSync http cfg.RepoId cfg.ApiToken newReview updatedStudio)
+                                ()
+                                SubmitReviewSyncResult
+                                OnException
+                        | _ -> Cmd.none
 
                 nextModel, Cmd.batch [ saveCmd; scrollCmd; syncCmd ]
 
@@ -422,6 +447,7 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
         { model with InspectingSummary = summaryOpt }, Cmd.none
 
     | SetActivePresenterId presIdOpt ->
+        let cleanSpace = if not (String.IsNullOrWhiteSpace model.HfSpaceUrlInput) then Some (model.HfSpaceUrlInput.Trim()) else model.Studio.HfConfig |> Option.bind (fun c -> c.SpaceUrl)
         let cleanRepo =
             if not (String.IsNullOrWhiteSpace model.HfRepoInput) then model.HfRepoInput.Trim()
             else match model.Studio.HfConfig with Some c when not (String.IsNullOrWhiteSpace c.RepoId) -> c.RepoId | _ -> "vykrum/peer-review"
@@ -435,6 +461,7 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                 AutoSync = true
                 LastSyncTime = Some DateTime.UtcNow
                 LastSyncStatus = Some "Synced"
+                SpaceUrl = cleanSpace
             }
         let updatedStudio = { model.Studio with ActivePresenterId = presIdOpt; HfConfig = Some hfCfg; LastUpdated = DateTime.UtcNow }
         let msg =
@@ -446,9 +473,13 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
 
         let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
         let syncCmd =
-            if not (String.IsNullOrWhiteSpace cleanRepo) && not (String.IsNullOrWhiteSpace cleanToken) then
-                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cleanRepo cleanToken updatedStudio) () GotHfSyncResult OnException
-            else Cmd.none
+            match cleanSpace with
+            | Some s when not (String.IsNullOrWhiteSpace s) ->
+                Cmd.OfAsync.either (fun () -> HfStorage.syncStateToSpace http s updatedStudio) () GotHfSyncResult OnException
+            | _ ->
+                if not (String.IsNullOrWhiteSpace cleanRepo) && not (String.IsNullOrWhiteSpace cleanToken) then
+                    Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cleanRepo cleanToken updatedStudio) () GotHfSyncResult OnException
+                else Cmd.none
         { model with Studio = updatedStudio; SuccessAlert = Some msg }, Cmd.batch [ saveLocal; syncCmd ]
 
     | UpdateRubricCriterionTitle (i, title) ->
@@ -500,6 +531,7 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
         { model with EditableRubric = HfStorage.defaultRubric; Studio = updatedStudio; InfoAlert = Some "Draft reset to architecture studio standard 4-dimension rubric." }, saveLocal
 
     | SaveRubric ->
+        let cleanSpace = if not (String.IsNullOrWhiteSpace model.HfSpaceUrlInput) then Some (model.HfSpaceUrlInput.Trim()) else model.Studio.HfConfig |> Option.bind (fun c -> c.SpaceUrl)
         let cleanRepo =
             if not (String.IsNullOrWhiteSpace model.HfRepoInput) then model.HfRepoInput.Trim()
             else match model.Studio.HfConfig with Some c when not (String.IsNullOrWhiteSpace c.RepoId) -> c.RepoId | _ -> "vykrum/peer-review"
@@ -513,13 +545,18 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                 AutoSync = true
                 LastSyncTime = Some DateTime.UtcNow
                 LastSyncStatus = Some "Synced"
+                SpaceUrl = cleanSpace
             }
         let updatedStudio = { model.Studio with Rubric = model.EditableRubric; HfConfig = Some hfCfg; LastUpdated = DateTime.UtcNow }
         let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
         let syncCmd =
-            if not (String.IsNullOrWhiteSpace cleanRepo) && not (String.IsNullOrWhiteSpace cleanToken) then
-                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cleanRepo cleanToken updatedStudio) () GotHfSyncResult OnException
-            else Cmd.none
+            match cleanSpace with
+            | Some s when not (String.IsNullOrWhiteSpace s) ->
+                Cmd.OfAsync.either (fun () -> HfStorage.syncStateToSpace http s updatedStudio) () GotHfSyncResult OnException
+            | _ ->
+                if not (String.IsNullOrWhiteSpace cleanRepo) && not (String.IsNullOrWhiteSpace cleanToken) then
+                    Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cleanRepo cleanToken updatedStudio) () GotHfSyncResult OnException
+                else Cmd.none
         { model with
             Studio = updatedStudio
             SuccessAlert = Some ("Rubric saved with " + string model.EditableRubric.Length + " criteria (Total: " + string (model.EditableRubric |> List.sumBy (fun c -> c.MaxScore)) + " marks).")
@@ -594,6 +631,7 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
         { model with EditablePresenters = updated; Studio = updatedStudio }, saveLocal
 
     | SavePresenters ->
+        let cleanSpace = if not (String.IsNullOrWhiteSpace model.HfSpaceUrlInput) then Some (model.HfSpaceUrlInput.Trim()) else model.Studio.HfConfig |> Option.bind (fun c -> c.SpaceUrl)
         let cleanRepo =
             if not (String.IsNullOrWhiteSpace model.HfRepoInput) then model.HfRepoInput.Trim()
             else match model.Studio.HfConfig with Some c when not (String.IsNullOrWhiteSpace c.RepoId) -> c.RepoId | _ -> "vykrum/peer-review"
@@ -607,13 +645,18 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                 AutoSync = true
                 LastSyncTime = Some DateTime.UtcNow
                 LastSyncStatus = Some "Synced"
+                SpaceUrl = cleanSpace
             }
         let updatedStudio = { model.Studio with Presenters = model.EditablePresenters; HfConfig = Some hfCfg; LastUpdated = DateTime.UtcNow }
         let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
         let syncCmd =
-            if not (String.IsNullOrWhiteSpace cleanRepo) && not (String.IsNullOrWhiteSpace cleanToken) then
-                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cleanRepo cleanToken updatedStudio) () GotHfSyncResult OnException
-            else Cmd.none
+            match cleanSpace with
+            | Some s when not (String.IsNullOrWhiteSpace s) ->
+                Cmd.OfAsync.either (fun () -> HfStorage.syncStateToSpace http s updatedStudio) () GotHfSyncResult OnException
+            | _ ->
+                if not (String.IsNullOrWhiteSpace cleanRepo) && not (String.IsNullOrWhiteSpace cleanToken) then
+                    Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cleanRepo cleanToken updatedStudio) () GotHfSyncResult OnException
+                else Cmd.none
         { model with
             Studio = updatedStudio
             SuccessAlert = Some ("Presenter roster updated with " + string model.EditablePresenters.Length + " students and synced!")
@@ -631,6 +674,9 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
         { model with SuccessAlert = Some ("Generated Markdown juror report: " + filename) },
         Cmd.OfAsync.attempt (fun () -> downloadTextFileAsync js filename md "text/markdown;charset=utf-8") () OnException
 
+    | SetHfSpaceUrlInput spaceUrl ->
+        { model with HfSpaceUrlInput = spaceUrl }, Cmd.none
+
     | SetHfRepoInput repo ->
         { model with HfRepoInput = repo }, Cmd.none
 
@@ -638,24 +684,41 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
         { model with HfTokenInput = token }, Cmd.none
 
     | SyncToHuggingFace ->
-        if String.IsNullOrWhiteSpace(model.HfRepoInput) || String.IsNullOrWhiteSpace(model.HfTokenInput) then
-            { model with ErrorAlert = Some "Please provide both Hugging Face Dataset Repo ID (e.g. 'username/studio-peer-reviews') and an API Token." }, Cmd.none
-        else
-            let cleanRepo = model.HfRepoInput.Trim()
-            let cleanToken = model.HfTokenInput.Trim()
+        let spaceUrl = model.HfSpaceUrlInput.Trim()
+        let cleanRepo = model.HfRepoInput.Trim()
+        let cleanToken = model.HfTokenInput.Trim()
+        if not (String.IsNullOrWhiteSpace spaceUrl) then
+            let hfCfg =
+                {
+                    RepoId = if String.IsNullOrWhiteSpace cleanRepo then "vykrum/peer-review" else cleanRepo
+                    ApiToken = cleanToken
+                    AutoSync = true
+                    LastSyncTime = Some DateTime.UtcNow
+                    LastSyncStatus = Some "Syncing to Space..."
+                    SpaceUrl = Some spaceUrl
+                }
+            let updatedStudio = { model.Studio with HfConfig = Some hfCfg; LastUpdated = DateTime.UtcNow }
+            let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
+            let syncCmd = Cmd.OfAsync.either (fun () -> HfStorage.syncStateToSpace http spaceUrl updatedStudio) () GotHfSyncResult OnException
+            { model with Studio = updatedStudio; IsHfSyncing = true; InfoAlert = Some ($"Syncing studio state to Hugging Face Space ({spaceUrl})...") },
+            Cmd.batch [ saveLocal; syncCmd ]
+        elif not (String.IsNullOrWhiteSpace cleanRepo) && not (String.IsNullOrWhiteSpace cleanToken) then
             let hfCfg =
                 {
                     RepoId = cleanRepo
                     ApiToken = cleanToken
                     AutoSync = true
                     LastSyncTime = Some DateTime.UtcNow
-                    LastSyncStatus = Some "Syncing..."
+                    LastSyncStatus = Some "Syncing to Dataset..."
+                    SpaceUrl = None
                 }
             let updatedStudio = { model.Studio with HfConfig = Some hfCfg; LastUpdated = DateTime.UtcNow }
             let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
             let commitCmd = Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cleanRepo cleanToken updatedStudio) () GotHfSyncResult OnException
             { model with Studio = updatedStudio; IsHfSyncing = true; InfoAlert = Some "Connecting to Hugging Face Hub Commit API..." },
             Cmd.batch [ saveLocal; commitCmd ]
+        else
+            { model with ErrorAlert = Some "Please provide a Hugging Face Space URL (Zero-Token mode) or a Dataset Repo ID with Write Token." }, Cmd.none
 
     | GotHfSyncResult (Ok msg) ->
         let updatedCfg =
@@ -672,13 +735,17 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
         { model with Studio = updatedStudio; IsHfSyncing = false; ErrorAlert = Some err; InfoAlert = None }, Cmd.none
 
     | FetchFromHuggingFace ->
+        let spaceUrl = model.HfSpaceUrlInput.Trim()
         let repoId = model.HfRepoInput.Trim()
         let tokenOpt = if String.IsNullOrWhiteSpace(model.HfTokenInput) then None else Some (model.HfTokenInput.Trim())
-        if String.IsNullOrWhiteSpace(repoId) then
-            { model with ErrorAlert = Some "Please enter a Hugging Face Dataset Repo ID to fetch from." }, Cmd.none
-        else
+        if not (String.IsNullOrWhiteSpace spaceUrl) then
+            { model with IsHfSyncing = true; InfoAlert = Some ($"Fetching live state from Space ({spaceUrl})...") },
+            Cmd.OfAsync.either (fun () -> HfStorage.fetchFromSpace http spaceUrl) () GotHfFetchResult OnException
+        elif not (String.IsNullOrWhiteSpace repoId) then
             { model with IsHfSyncing = true; InfoAlert = Some ("Fetching latest dataset from Hugging Face (" + repoId + ")...") },
             Cmd.OfAsync.either (fun () -> HfStorage.fetchFromHuggingFace http repoId tokenOpt) () GotHfFetchResult OnException
+        else
+            { model with ErrorAlert = Some "Please enter a Space URL or Hugging Face Dataset Repo ID to fetch from." }, Cmd.none
 
     | GotHfFetchResult (Ok remoteState) ->
         let bulk =
@@ -730,9 +797,15 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
             let updatedStudio = { model.Studio with HfConfig = Some cfg }
             let saveCmd = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
             let cleanUrlCmd = Cmd.OfAsync.attempt (fun () -> async { do! js.InvokeVoidAsync("studioReview.cleanSyncUrl").AsTask() |> Async.AwaitTask }) () OnException
-            let fetchCmd = Cmd.OfAsync.either (fun () -> HfStorage.fetchFromHuggingFace http cfg.RepoId (Some cfg.ApiToken)) () GotHfFetchResult OnException
+            let fetchCmd =
+                match cfg.SpaceUrl with
+                | Some s when not (String.IsNullOrWhiteSpace s) ->
+                    Cmd.OfAsync.either (fun () -> HfStorage.fetchFromSpace http s) () GotHfFetchResult OnException
+                | _ ->
+                    Cmd.OfAsync.either (fun () -> HfStorage.fetchFromHuggingFace http cfg.RepoId (Some cfg.ApiToken)) () GotHfFetchResult OnException
             { model with
                 Studio = updatedStudio
+                HfSpaceUrlInput = cfg.SpaceUrl |> Option.defaultValue model.HfSpaceUrlInput
                 HfRepoInput = cfg.RepoId
                 HfTokenInput = cfg.ApiToken
                 SuccessAlert = Some "🟢 Studio Cloud Sync connected! You are now live with the jury stage."
@@ -749,14 +822,20 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
             let updatedStudio = { model.Studio with HfConfig = Some cfg }
             let saveCmd = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
             let cleanUrlCmd = Cmd.OfAsync.attempt (fun () -> async { do! js.InvokeVoidAsync("studioReview.cleanSyncUrl").AsTask() |> Async.AwaitTask }) () OnException
-            let fetchCmd = Cmd.OfAsync.either (fun () -> HfStorage.fetchFromHuggingFace http cfg.RepoId (Some cfg.ApiToken)) () GotHfFetchResult OnException
+            let fetchCmd =
+                match cfg.SpaceUrl with
+                | Some s when not (String.IsNullOrWhiteSpace s) ->
+                    Cmd.OfAsync.either (fun () -> HfStorage.fetchFromSpace http s) () GotHfFetchResult OnException
+                | _ ->
+                    Cmd.OfAsync.either (fun () -> HfStorage.fetchFromHuggingFace http cfg.RepoId (Some cfg.ApiToken)) () GotHfFetchResult OnException
             { model with
                 Studio = updatedStudio
+                HfSpaceUrlInput = cfg.SpaceUrl |> Option.defaultValue model.HfSpaceUrlInput
                 HfRepoInput = cfg.RepoId
                 HfTokenInput = cfg.ApiToken
                 IsAdminUnlocked = true
                 Page = Page.Admin
-                SuccessAlert = Some "🔑 Admin Console unlocked & connected to Hugging Face dataset on this device!"
+                SuccessAlert = Some "🔑 Admin Console unlocked & connected on this device!"
             }, Cmd.batch [ saveCmd; cleanUrlCmd; fetchCmd ]
         | None -> model, Cmd.none
 
@@ -774,28 +853,43 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
                     OnException
             else Cmd.none
 
-        let repoToPoll =
+        let spaceToPoll =
             match model.Studio.HfConfig with
-            | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) -> cfg.RepoId.Trim()
+            | Some cfg when cfg.SpaceUrl.IsSome && not (String.IsNullOrWhiteSpace cfg.SpaceUrl.Value) -> Some (cfg.SpaceUrl.Value.Trim())
             | _ ->
-                if not (String.IsNullOrWhiteSpace model.HfRepoInput) then model.HfRepoInput.Trim()
-                else "vykrum/peer-review"
-
-        let tokenToPoll =
-            match model.Studio.HfConfig with
-            | Some cfg when not (String.IsNullOrWhiteSpace cfg.ApiToken) -> Some cfg.ApiToken
-            | _ ->
-                if not (String.IsNullOrWhiteSpace model.HfTokenInput) then Some (model.HfTokenInput.Trim())
+                if not (String.IsNullOrWhiteSpace model.HfSpaceUrlInput) then Some (model.HfSpaceUrlInput.Trim())
                 else None
 
         let fetchCmd =
-            if not (String.IsNullOrWhiteSpace repoToPoll) then
+            match spaceToPoll with
+            | Some spaceUrl ->
                 Cmd.OfAsync.either
-                    (fun () -> HfStorage.fetchFromHuggingFace http repoToPoll tokenToPoll)
+                    (fun () -> HfStorage.fetchFromSpace http spaceUrl)
                     ()
                     GotHfFetchResult
                     OnException
-            else Cmd.none
+            | None ->
+                let repoToPoll =
+                    match model.Studio.HfConfig with
+                    | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) -> cfg.RepoId.Trim()
+                    | _ ->
+                        if not (String.IsNullOrWhiteSpace model.HfRepoInput) then model.HfRepoInput.Trim()
+                        else "vykrum/peer-review"
+
+                let tokenToPoll =
+                    match model.Studio.HfConfig with
+                    | Some cfg when not (String.IsNullOrWhiteSpace cfg.ApiToken) -> Some cfg.ApiToken
+                    | _ ->
+                        if not (String.IsNullOrWhiteSpace model.HfTokenInput) then Some (model.HfTokenInput.Trim())
+                        else None
+
+                if not (String.IsNullOrWhiteSpace repoToPoll) then
+                    Cmd.OfAsync.either
+                        (fun () -> HfStorage.fetchFromHuggingFace http repoToPoll tokenToPoll)
+                        ()
+                        GotHfFetchResult
+                        OnException
+                else Cmd.none
 
         model, Cmd.batch [ fetchCmd; pollDelayCmd ]
 
@@ -1707,15 +1801,15 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
 
         | SubTabHuggingFace ->
             let hasConfig =
-                not (String.IsNullOrWhiteSpace model.HfRepoInput) && not (String.IsNullOrWhiteSpace model.HfTokenInput)
+                not (String.IsNullOrWhiteSpace model.HfSpaceUrlInput) || (not (String.IsNullOrWhiteSpace model.HfRepoInput) && not (String.IsNullOrWhiteSpace model.HfTokenInput))
             let cleanBase = if String.IsNullOrWhiteSpace model.BaseUrl then "http://localhost:5098/" else model.BaseUrl
             let studentShareLink =
                 if hasConfig then
-                    HfStorage.generateShareableStudentLink cleanBase model.HfRepoInput model.HfTokenInput
+                    HfStorage.generateShareableStudentLink cleanBase model.HfSpaceUrlInput model.HfRepoInput model.HfTokenInput
                 else ""
             let adminShareLink =
                 if hasConfig then
-                    HfStorage.generateShareableAdminLink cleanBase model.HfRepoInput model.HfTokenInput
+                    HfStorage.generateShareableAdminLink cleanBase model.HfSpaceUrlInput model.HfRepoInput model.HfTokenInput
                 else ""
 
             div {
@@ -1724,8 +1818,8 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
                     div {
                         attr.style "text-align: center; margin-bottom: 2rem;"
                         div { attr.style "font-size: 3rem; margin-bottom: 0.5rem;"; text "🤗" }
-                        h3 { attr.style "font-family: var(--font-display); font-size: 1.4rem;"; text "Hugging Face Dataset Storage & Live Aggregation" }
-                        p { attr.style "color: var(--text-muted); font-size: 0.88rem; margin-top: 0.35rem;"; text "Store, retrieve, and automatically aggregate student reviews in real time using Hugging Face Datasets." }
+                        h3 { attr.style "font-family: var(--font-display); font-size: 1.4rem;"; text "Zero-Token Cloud Sync & Live Multi-Student Aggregation" }
+                        p { attr.style "color: var(--text-muted); font-size: 0.88rem; margin-top: 0.35rem;"; text "Sync student reviews, stage spotlight, and class rubrics in real time without entering any write tokens or passwords in the browser." }
                     }
 
                     cond hasConfig <| function
@@ -1737,11 +1831,11 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
 
                                     div {
                                         attr.style "display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;"
-                                        h4 { attr.style "font-family: var(--font-display); font-size: 1.15rem; color: var(--accent-cyan); margin: 0;"; text "📱 1-Click Shareable Link for Students" }
+                                        h4 { attr.style "font-family: var(--font-display); font-size: 1.15rem; color: var(--accent-cyan); margin: 0;"; text "📱 1-Click Shareable Link for Students (Zero-Token)" }
                                         span { attr.``class`` "stage-pill"; text "🟢 Student Peer Portal" }
                                     }
 
-                                    p { attr.style "color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; margin-bottom: 1.25rem;"; text "Share this link with your 20–40 students or project the QR code on the wall. When students open it on their phones, their devices automatically link to this dataset and their grades pool together live!" }
+                                    p { attr.style "color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; margin-bottom: 1.25rem;"; text "Share this link with your 20–40 students or project the QR code on the wall. Students scan with their phone cameras and review peers live. ZERO write tokens, passwords, or logins required!" }
 
                                     div {
                                         attr.style "display: flex; gap: 0.5rem; margin-bottom: 1.25rem;"
@@ -1783,10 +1877,10 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
                                     div {
                                         attr.style "display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;"
                                         h4 { attr.style "font-family: var(--font-display); font-size: 1.15rem; color: var(--accent-amber); margin: 0;"; text "🔑 Private Faculty Admin Shortcut (Mobile & Anywhere)" }
-                                        span { attr.``class`` "stage-pill"; attr.style "border-color: var(--accent-amber); color: var(--accent-amber);"; text "🔒 Safe From Hugging Face Scanners" }
+                                        span { attr.``class`` "stage-pill"; attr.style "border-color: var(--accent-amber); color: var(--accent-amber);"; text "🔒 Zero Token Hassle" }
                                     }
 
-                                    p { attr.style "color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; margin-bottom: 1.25rem;"; text "Scan this QR code with your phone camera (or bookmark the link). It opens /admin already unlocked and permanently connected on your phone. Because it uses a client-side URL hash (#), the token is NEVER sent over the internet or committed to GitHub—keeping your Hugging Face token completely safe!" }
+                                    p { attr.style "color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; margin-bottom: 1.25rem;"; text "Scan this QR code with your phone camera (or bookmark the link). It opens /admin already unlocked and connected on your phone. You can advance presenters from your phone while walking around the studio!" }
 
                                     div {
                                         attr.style "display: flex; gap: 0.5rem; margin-bottom: 1.25rem;"
@@ -1823,41 +1917,67 @@ let viewAdminUnlocked (model: Model) (dispatch: Message -> unit) =
                             }
                         | false -> empty()
 
+                    // Configuration Panel
                     div {
                         attr.style "background: rgba(21, 28, 44, 0.4); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 1.5rem; margin-bottom: 1.5rem;"
 
                         div {
+                            attr.style "display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;"
+                            span { attr.style "font-size: 1.25rem;"; text "⚡" }
+                            h4 { attr.style "font-family: var(--font-display); font-size: 1.05rem; margin: 0; color: var(--accent-cyan);"; text "Hugging Face Space (Zero-Token Backend)" }
+                        }
+
+                        div {
                             attr.style "margin-bottom: 1.25rem;"
-                            label { attr.``class`` "form-label"; text "Hugging Face Dataset Repo ID (e.g. username/Peer-Review):" }
+                            label { attr.``class`` "form-label"; text "Hugging Face Space Backend URL:" }
                             input {
                                 attr.``class`` "input-studio"
                                 attr.``type`` "text"
-                                attr.placeholder "vykrum/Peer-Review"
-                                attr.value model.HfRepoInput
-                                on.input (fun e -> dispatch (SetHfRepoInput (string e.Value)))
+                                attr.placeholder "https://vykrum-peer-review-sync.hf.space"
+                                attr.value model.HfSpaceUrlInput
+                                on.input (fun e -> dispatch (SetHfSpaceUrlInput (string e.Value)))
+                            }
+                            p { attr.style "font-size: 0.75rem; color: var(--text-dim); margin-top: 0.35rem;"; text "Connects to your free Hugging Face Space. Zero tokens are required in the browser! The Space securely stores state and commits to your dataset behind the scenes." }
+                        }
+
+                        div {
+                            attr.style "margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px dashed var(--border-subtle);"
+                            div {
+                                attr.style "display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;"
+                                label { attr.style "font-size: 0.85rem; color: var(--text-muted); font-weight: 500;"; text "Optional: Direct Dataset Commit (Requires HF Write Token)" }
+                            }
+                            div {
+                                attr.style "display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 0.5rem;"
+                                div {
+                                    label { attr.``class`` "form-label"; attr.style "font-size: 0.75rem;"; text "Dataset Repo ID:" }
+                                    input {
+                                        attr.``class`` "input-studio"
+                                        attr.``type`` "text"
+                                        attr.placeholder "vykrum/peer-review"
+                                        attr.value model.HfRepoInput
+                                        on.input (fun e -> dispatch (SetHfRepoInput (string e.Value)))
+                                    }
+                                }
+                                div {
+                                    label { attr.``class`` "form-label"; attr.style "font-size: 0.75rem;"; text "HF Write Token (Optional):" }
+                                    input {
+                                        attr.``class`` "input-studio"
+                                        attr.``type`` "password"
+                                        attr.placeholder "hf_xxxxxxxxxxxxxxxxxxxx"
+                                        attr.value model.HfTokenInput
+                                        on.input (fun e -> dispatch (SetHfTokenInput (string e.Value)))
+                                    }
+                                }
                             }
                         }
 
                         div {
-                            attr.style "margin-bottom: 1.5rem;"
-                            label { attr.``class`` "form-label"; text "Hugging Face Write Token:" }
-                            input {
-                                attr.``class`` "input-studio"
-                                attr.``type`` "password"
-                                attr.placeholder "hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                                attr.value model.HfTokenInput
-                                on.input (fun e -> dispatch (SetHfTokenInput (string e.Value)))
-                            }
-                            p { attr.style "font-size: 0.72rem; color: var(--text-dim); margin-top: 0.3rem;"; text "Create a free token with 'Write' permission at huggingface.co/settings/tokens. Only stored in your browser." }
-                        }
-
-                        div {
-                            attr.style "display: flex; justify-content: flex-end; gap: 0.75rem;"
+                            attr.style "display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1.25rem;"
                             button {
                                 attr.``class`` "btn-admin"
                                 attr.disabled model.IsHfSyncing
                                 on.click (fun _ -> dispatch FetchFromHuggingFace)
-                                text "📥 Pull Latest from HF"
+                                text "📥 Pull Latest State"
                             }
                             button {
                                 attr.``class`` "btn-primary"

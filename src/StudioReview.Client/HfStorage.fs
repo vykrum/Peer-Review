@@ -125,6 +125,7 @@ module HfStorage =
                         AutoSync = true
                         LastSyncTime = None
                         LastSyncStatus = Some "Ready to connect"
+                        SpaceUrl = Some "https://vykrum-peer-review-sync.hf.space"
                     }
             LastUpdated = DateTime.UtcNow
         }
@@ -412,6 +413,78 @@ module HfStorage =
                     return Error $"Commit failed: {ex.Message}"
         }
 
+    /// Fetch latest StudioState from Hugging Face Space backend (Zero Token REST endpoint)
+    let fetchFromSpace (http: HttpClient) (spaceUrl: string) : Async<Result<StudioState, string>> =
+        async {
+            if String.IsNullOrWhiteSpace spaceUrl then
+                return Error "Space URL is required."
+            else
+                try
+                    let cleanUrl = spaceUrl.Trim().TrimEnd('/')
+                    let cacheBuster = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                    let url = $"{cleanUrl}/state?_t={cacheBuster}"
+                    use req = new HttpRequestMessage(HttpMethod.Get, url)
+                    req.Headers.CacheControl <- CacheControlHeaderValue(NoCache = true, NoStore = true)
+                    let! resp = http.SendAsync(req) |> Async.AwaitTask
+                    if resp.IsSuccessStatusCode then
+                        let! json = resp.Content.ReadAsStringAsync() |> Async.AwaitTask
+                        let loadedState = JsonSerializer.Deserialize<StudioState>(json, jsonOptions)
+                        return Ok loadedState
+                    else
+                        let! err = resp.Content.ReadAsStringAsync() |> Async.AwaitTask
+                        return Error $"Space returned HTTP {(int)resp.StatusCode}: {err}"
+                with ex ->
+                    return Error $"Failed to reach Hugging Face Space at {spaceUrl}: {ex.Message}"
+        }
+
+    /// Sync full StudioState (roster, rubric, stage presenter) to Hugging Face Space (Zero Token)
+    let syncStateToSpace (http: HttpClient) (spaceUrl: string) (state: StudioState) : Async<Result<string, string>> =
+        async {
+            if String.IsNullOrWhiteSpace spaceUrl then
+                return Error "Space URL is required."
+            else
+                try
+                    let cleanUrl = spaceUrl.Trim().TrimEnd('/')
+                    let url = $"{cleanUrl}/state"
+                    let json = JsonSerializer.Serialize(state, jsonOptions)
+                    use content = new StringContent(json, Encoding.UTF8, "application/json")
+                    let! resp = http.PostAsync(url, content) |> Async.AwaitTask
+                    if resp.IsSuccessStatusCode then
+                        return Ok $"Successfully synced state to Space ({cleanUrl})!"
+                    else
+                        let! err = resp.Content.ReadAsStringAsync() |> Async.AwaitTask
+                        return Error $"Space returned HTTP {(int)resp.StatusCode}: {err}"
+                with ex ->
+                    return Error $"Failed to sync to Space: {ex.Message}"
+        }
+
+    /// Submit student review to Space backend (Zero Token)
+    let submitReviewToSpace (http: HttpClient) (spaceUrl: string) (newReview: Review) (localStudio: StudioState) : Async<Result<StudioState, string>> =
+        async {
+            if String.IsNullOrWhiteSpace spaceUrl then
+                return Ok localStudio
+            else
+                try
+                    let cleanUrl = spaceUrl.Trim().TrimEnd('/')
+                    let url = $"{cleanUrl}/review"
+                    let json = JsonSerializer.Serialize(newReview, jsonOptions)
+                    use content = new StringContent(json, Encoding.UTF8, "application/json")
+                    let! resp = http.PostAsync(url, content) |> Async.AwaitTask
+                    if resp.IsSuccessStatusCode then
+                        let! fetchRes = fetchFromSpace http spaceUrl
+                        match fetchRes with
+                        | Ok remState -> return Ok remState
+                        | Error _ ->
+                            let mergedReviews =
+                                newReview :: (localStudio.Reviews |> List.filter (fun r -> not (r.ReviewerToken = newReview.ReviewerToken && r.PresenterId = newReview.PresenterId)))
+                            return Ok { localStudio with Reviews = mergedReviews; LastUpdated = DateTime.UtcNow }
+                    else
+                        let! err = resp.Content.ReadAsStringAsync() |> Async.AwaitTask
+                        return Error $"Space returned HTTP {(int)resp.StatusCode}: {err}"
+                with ex ->
+                    return Error $"Failed to submit review to Space: {ex.Message}"
+        }
+
     /// Fetches latest state from Hugging Face, appends/merges the student's review, and pushes the combined state
     let submitReviewAndSync (http: HttpClient) (repoId: string) (apiToken: string) (newReview: Review) (localStudio: StudioState) : Async<Result<StudioState, string>> =
         async {
@@ -446,52 +519,90 @@ module HfStorage =
                     return Error ex.Message
         }
 
-    /// Generate shareable student link containing encoded HF sync parameters
-    let generateShareableStudentLink (baseUrl: string) (repoId: string) (token: string) : string =
+    /// Generate shareable student link (Zero-token Space URL or Direct Dataset)
+    let generateShareableStudentLink (baseUrl: string) (spaceUrl: string) (repoId: string) (token: string) : string =
         let rawBase = if baseUrl.EndsWith("/") then baseUrl else baseUrl + "/"
         let cleanBase =
             if rawBase.EndsWith("/admin/") then rawBase.Substring(0, rawBase.Length - 6)
             elif rawBase.EndsWith("/admin") then rawBase.Substring(0, rawBase.Length - 5) + "/"
             else rawBase
-        let cleanRepo = repoId.Trim().Trim('/')
-        let payload = {| repo = cleanRepo; token = token.Trim() |}
-        let json = JsonSerializer.Serialize(payload)
-        let b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
-        let encoded = Uri.EscapeDataString(b64)
-        $"{cleanBase}?sync={encoded}"
+        if not (String.IsNullOrWhiteSpace spaceUrl) then
+            let cleanSpace = spaceUrl.Trim().TrimEnd('/')
+            let payload = {| space = cleanSpace |}
+            let json = JsonSerializer.Serialize(payload)
+            let b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
+            let encoded = Uri.EscapeDataString(b64)
+            $"{cleanBase}?sync={encoded}"
+        elif not (String.IsNullOrWhiteSpace repoId) then
+            let cleanRepo = repoId.Trim().Trim('/')
+            let payload = {| repo = cleanRepo; token = token.Trim() |}
+            let json = JsonSerializer.Serialize(payload)
+            let b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
+            let encoded = Uri.EscapeDataString(b64)
+            $"{cleanBase}?sync={encoded}"
+        else
+            cleanBase
 
-    /// Generate shareable faculty admin link containing encoded HF sync parameters in URL hash fragment
-    let generateShareableAdminLink (baseUrl: string) (repoId: string) (token: string) : string =
+    /// Generate shareable faculty admin link (Zero-token Space URL or Direct Dataset)
+    let generateShareableAdminLink (baseUrl: string) (spaceUrl: string) (repoId: string) (token: string) : string =
         let rawBase = if baseUrl.EndsWith("/") then baseUrl else baseUrl + "/"
         let cleanBase =
             if rawBase.EndsWith("/admin/") then rawBase
             elif rawBase.EndsWith("/admin") then rawBase + "/"
             else rawBase + "admin"
-        let cleanRepo = repoId.Trim().Trim('/')
-        let payload = {| repo = cleanRepo; token = token.Trim() |}
-        let json = JsonSerializer.Serialize(payload)
-        let b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
-        let encoded = Uri.EscapeDataString(b64)
-        $"{cleanBase}#admin_sync={encoded}"
+        if not (String.IsNullOrWhiteSpace spaceUrl) then
+            let cleanSpace = spaceUrl.Trim().TrimEnd('/')
+            let payload = {| space = cleanSpace |}
+            let json = JsonSerializer.Serialize(payload)
+            let b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
+            let encoded = Uri.EscapeDataString(b64)
+            $"{cleanBase}#admin_sync={encoded}"
+        elif not (String.IsNullOrWhiteSpace repoId) then
+            let cleanRepo = repoId.Trim().Trim('/')
+            let payload = {| repo = cleanRepo; token = token.Trim() |}
+            let json = JsonSerializer.Serialize(payload)
+            let b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
+            let encoded = Uri.EscapeDataString(b64)
+            $"{cleanBase}#admin_sync={encoded}"
+        else
+            cleanBase
 
-    /// Parse sync parameter JSON from URL
+    /// Parse sync parameter JSON from URL (?sync=... or #admin_sync=...)
     let parseSyncParam (syncJson: string) : HuggingFaceConfig option =
         if String.IsNullOrWhiteSpace(syncJson) then None
         else
             try
                 use doc = JsonDocument.Parse(syncJson)
                 let root = doc.RootElement
-                let repo = root.GetProperty("repo").GetString()
-                let token = root.GetProperty("token").GetString()
-                if not (String.IsNullOrWhiteSpace repo) && not (String.IsNullOrWhiteSpace token) then
-                    Some
-                        {
-                            RepoId = repo.Trim()
-                            ApiToken = token.Trim()
-                            AutoSync = true
-                            LastSyncTime = None
-                            LastSyncStatus = Some "Connected via 1-Click Link"
-                        }
+                if root.TryGetProperty("space", ref (Unchecked.defaultof<JsonElement>)) then
+                    let spaceProp = root.GetProperty("space")
+                    let space = spaceProp.GetString()
+                    if not (String.IsNullOrWhiteSpace space) then
+                        Some
+                            {
+                                RepoId = "vykrum/peer-review"
+                                ApiToken = ""
+                                AutoSync = true
+                                LastSyncTime = None
+                                LastSyncStatus = Some "Connected via Zero-Token Space"
+                                SpaceUrl = Some (space.Trim())
+                            }
+                    else None
+                elif root.TryGetProperty("repo", ref (Unchecked.defaultof<JsonElement>)) then
+                    let repo = root.GetProperty("repo").GetString()
+                    let token = if root.TryGetProperty("token", ref (Unchecked.defaultof<JsonElement>)) then root.GetProperty("token").GetString() else ""
+                    if not (String.IsNullOrWhiteSpace repo) then
+                        Some
+                            {
+                                RepoId = repo.Trim()
+                                ApiToken = if isNull token then "" else token.Trim()
+                                AutoSync = true
+                                LastSyncTime = None
+                                LastSyncStatus = Some "Connected via 1-Click Link"
+                                SpaceUrl = None
+                            }
+                    else None
                 else None
             with _ -> None
+
 
