@@ -318,8 +318,10 @@ module HfStorage =
             else
                 try
                     let cleanRepo = repoId.Trim().Trim('/')
-                    let url = $"https://huggingface.co/datasets/{cleanRepo}/raw/main/studio_state.json"
+                    let cacheBuster = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                    let url = $"https://huggingface.co/datasets/{cleanRepo}/raw/main/studio_state.json?_t={cacheBuster}"
                     use req = new HttpRequestMessage(HttpMethod.Get, url)
+                    req.Headers.CacheControl <- CacheControlHeaderValue(NoCache = true, NoStore = true)
                     match tokenOpt with
                     | Some token when not (String.IsNullOrWhiteSpace token) ->
                         req.Headers.Authorization <- AuthenticationHeaderValue("Bearer", token.Trim())

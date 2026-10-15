@@ -422,20 +422,33 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
         { model with InspectingSummary = summaryOpt }, Cmd.none
 
     | SetActivePresenterId presIdOpt ->
-        let updatedStudio = { model.Studio with ActivePresenterId = presIdOpt; LastUpdated = DateTime.UtcNow }
+        let cleanRepo =
+            if not (String.IsNullOrWhiteSpace model.HfRepoInput) then model.HfRepoInput.Trim()
+            else match model.Studio.HfConfig with Some c when not (String.IsNullOrWhiteSpace c.RepoId) -> c.RepoId | _ -> "vykrum/peer-review"
+        let cleanToken =
+            if not (String.IsNullOrWhiteSpace model.HfTokenInput) then model.HfTokenInput.Trim()
+            else match model.Studio.HfConfig with Some c -> c.ApiToken | _ -> ""
+        let hfCfg =
+            {
+                RepoId = cleanRepo
+                ApiToken = cleanToken
+                AutoSync = true
+                LastSyncTime = Some DateTime.UtcNow
+                LastSyncStatus = Some "Synced"
+            }
+        let updatedStudio = { model.Studio with ActivePresenterId = presIdOpt; HfConfig = Some hfCfg; LastUpdated = DateTime.UtcNow }
         let msg =
             match presIdOpt with
             | Some id ->
                 let name = model.Studio.Presenters |> List.tryFind (fun p -> p.Id = id) |> Option.map (fun p -> p.Name) |> Option.defaultValue id
-                "Active presenter set to '" + name + "'."
+                "Active presenter set to '" + name + "' and synced to stage."
             | None -> "Active stage spotlight cleared."
 
         let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
         let syncCmd =
-            match updatedStudio.HfConfig with
-            | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
-                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cfg.RepoId cfg.ApiToken updatedStudio) () GotHfSyncResult OnException
-            | _ -> Cmd.none
+            if not (String.IsNullOrWhiteSpace cleanRepo) && not (String.IsNullOrWhiteSpace cleanToken) then
+                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cleanRepo cleanToken updatedStudio) () GotHfSyncResult OnException
+            else Cmd.none
         { model with Studio = updatedStudio; SuccessAlert = Some msg }, Cmd.batch [ saveLocal; syncCmd ]
 
     | UpdateRubricCriterionTitle (i, title) ->
@@ -487,13 +500,26 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
         { model with EditableRubric = HfStorage.defaultRubric; Studio = updatedStudio; InfoAlert = Some "Draft reset to architecture studio standard 4-dimension rubric." }, saveLocal
 
     | SaveRubric ->
-        let updatedStudio = { model.Studio with Rubric = model.EditableRubric; LastUpdated = DateTime.UtcNow }
+        let cleanRepo =
+            if not (String.IsNullOrWhiteSpace model.HfRepoInput) then model.HfRepoInput.Trim()
+            else match model.Studio.HfConfig with Some c when not (String.IsNullOrWhiteSpace c.RepoId) -> c.RepoId | _ -> "vykrum/peer-review"
+        let cleanToken =
+            if not (String.IsNullOrWhiteSpace model.HfTokenInput) then model.HfTokenInput.Trim()
+            else match model.Studio.HfConfig with Some c -> c.ApiToken | _ -> ""
+        let hfCfg =
+            {
+                RepoId = cleanRepo
+                ApiToken = cleanToken
+                AutoSync = true
+                LastSyncTime = Some DateTime.UtcNow
+                LastSyncStatus = Some "Synced"
+            }
+        let updatedStudio = { model.Studio with Rubric = model.EditableRubric; HfConfig = Some hfCfg; LastUpdated = DateTime.UtcNow }
         let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
         let syncCmd =
-            match updatedStudio.HfConfig with
-            | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
-                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cfg.RepoId cfg.ApiToken updatedStudio) () GotHfSyncResult OnException
-            | _ -> Cmd.none
+            if not (String.IsNullOrWhiteSpace cleanRepo) && not (String.IsNullOrWhiteSpace cleanToken) then
+                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cleanRepo cleanToken updatedStudio) () GotHfSyncResult OnException
+            else Cmd.none
         { model with
             Studio = updatedStudio
             SuccessAlert = Some ("Rubric saved with " + string model.EditableRubric.Length + " criteria (Total: " + string (model.EditableRubric |> List.sumBy (fun c -> c.MaxScore)) + " marks).")
@@ -568,13 +594,26 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
         { model with EditablePresenters = updated; Studio = updatedStudio }, saveLocal
 
     | SavePresenters ->
-        let updatedStudio = { model.Studio with Presenters = model.EditablePresenters; LastUpdated = DateTime.UtcNow }
+        let cleanRepo =
+            if not (String.IsNullOrWhiteSpace model.HfRepoInput) then model.HfRepoInput.Trim()
+            else match model.Studio.HfConfig with Some c when not (String.IsNullOrWhiteSpace c.RepoId) -> c.RepoId | _ -> "vykrum/peer-review"
+        let cleanToken =
+            if not (String.IsNullOrWhiteSpace model.HfTokenInput) then model.HfTokenInput.Trim()
+            else match model.Studio.HfConfig with Some c -> c.ApiToken | _ -> ""
+        let hfCfg =
+            {
+                RepoId = cleanRepo
+                ApiToken = cleanToken
+                AutoSync = true
+                LastSyncTime = Some DateTime.UtcNow
+                LastSyncStatus = Some "Synced"
+            }
+        let updatedStudio = { model.Studio with Presenters = model.EditablePresenters; HfConfig = Some hfCfg; LastUpdated = DateTime.UtcNow }
         let saveLocal = Cmd.OfAsync.attempt (fun () -> HfStorage.saveToLocalStorage js updatedStudio) () OnException
         let syncCmd =
-            match updatedStudio.HfConfig with
-            | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
-                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cfg.RepoId cfg.ApiToken updatedStudio) () GotHfSyncResult OnException
-            | _ -> Cmd.none
+            if not (String.IsNullOrWhiteSpace cleanRepo) && not (String.IsNullOrWhiteSpace cleanToken) then
+                Cmd.OfAsync.either (fun () -> HfStorage.commitToHuggingFace http cleanRepo cleanToken updatedStudio) () GotHfSyncResult OnException
+            else Cmd.none
         { model with
             Studio = updatedStudio
             SuccessAlert = Some ("Presenter roster updated with " + string model.EditablePresenters.Length + " students and synced!")
@@ -729,23 +768,36 @@ let update (http: HttpClient) (js: IJSRuntime) (message: Message) (model: Model)
         let pollDelayCmd =
             if model.IsAutoPollingEnabled then
                 Cmd.OfAsync.either
-                    (fun () -> async { do! Async.Sleep 12000 })
+                    (fun () -> async { do! Async.Sleep 6000 })
                     ()
                     (fun () -> PollLiveState)
                     OnException
             else Cmd.none
 
-        match model.Studio.HfConfig with
-        | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) && not (String.IsNullOrWhiteSpace cfg.ApiToken) ->
-            let fetchCmd =
+        let repoToPoll =
+            match model.Studio.HfConfig with
+            | Some cfg when not (String.IsNullOrWhiteSpace cfg.RepoId) -> cfg.RepoId.Trim()
+            | _ ->
+                if not (String.IsNullOrWhiteSpace model.HfRepoInput) then model.HfRepoInput.Trim()
+                else "vykrum/peer-review"
+
+        let tokenToPoll =
+            match model.Studio.HfConfig with
+            | Some cfg when not (String.IsNullOrWhiteSpace cfg.ApiToken) -> Some cfg.ApiToken
+            | _ ->
+                if not (String.IsNullOrWhiteSpace model.HfTokenInput) then Some (model.HfTokenInput.Trim())
+                else None
+
+        let fetchCmd =
+            if not (String.IsNullOrWhiteSpace repoToPoll) then
                 Cmd.OfAsync.either
-                    (fun () -> HfStorage.fetchFromHuggingFace http cfg.RepoId (Some cfg.ApiToken))
+                    (fun () -> HfStorage.fetchFromHuggingFace http repoToPoll tokenToPoll)
                     ()
                     GotHfFetchResult
                     OnException
-            model, Cmd.batch [ fetchCmd; pollDelayCmd ]
-        | _ ->
-            model, pollDelayCmd
+            else Cmd.none
+
+        model, Cmd.batch [ fetchCmd; pollDelayCmd ]
 
     | ToggleAutoPolling ->
         let next = not model.IsAutoPollingEnabled
@@ -993,21 +1045,31 @@ let viewStudioFeed (model: Model) (dispatch: Message -> unit) =
             }
 
             div {
-                attr.``class`` "filter-pills"
+                attr.style "display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;"
                 button {
-                    attr.``class`` (if model.Filter = FilterAll then "filter-btn is-active" else "filter-btn")
-                    on.click (fun _ -> dispatch (SetFilter FilterAll))
-                    text "All Students"
+                    attr.``class`` "filter-btn"
+                    attr.style "border-color: var(--accent-cyan); color: var(--accent-cyan); font-weight: 600;"
+                    attr.disabled model.IsHfSyncing
+                    on.click (fun _ -> dispatch FetchFromHuggingFace)
+                    text (if model.IsHfSyncing then "⏳ Syncing..." else "🔄 Sync Roster")
                 }
-                button {
-                    attr.``class`` (if model.Filter = FilterPending then "filter-btn is-active" else "filter-btn")
-                    on.click (fun _ -> dispatch (SetFilter FilterPending))
-                    text "Pending My Review"
-                }
-                button {
-                    attr.``class`` (if model.Filter = FilterReviewed then "filter-btn is-active" else "filter-btn")
-                    on.click (fun _ -> dispatch (SetFilter FilterReviewed))
-                    text "Reviewed By Me"
+                div {
+                    attr.``class`` "filter-pills"
+                    button {
+                        attr.``class`` (if model.Filter = FilterAll then "filter-btn is-active" else "filter-btn")
+                        on.click (fun _ -> dispatch (SetFilter FilterAll))
+                        text "All Students"
+                    }
+                    button {
+                        attr.``class`` (if model.Filter = FilterPending then "filter-btn is-active" else "filter-btn")
+                        on.click (fun _ -> dispatch (SetFilter FilterPending))
+                        text "Pending My Review"
+                    }
+                    button {
+                        attr.``class`` (if model.Filter = FilterReviewed then "filter-btn is-active" else "filter-btn")
+                        on.click (fun _ -> dispatch (SetFilter FilterReviewed))
+                        text "Reviewed By Me"
+                    }
                 }
             }
         }
