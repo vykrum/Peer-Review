@@ -13,10 +13,9 @@ from huggingface_hub import HfApi, CommitOperationAdd
 # ZeroGPU compatibility handler
 try:
     import spaces
-    @spaces.GPU(duration=10)
+    @spaces.GPU
     def gpu_init():
         return "ZeroGPU Initialized"
-    gpu_init()
 except Exception:
     pass
 
