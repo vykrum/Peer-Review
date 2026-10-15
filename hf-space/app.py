@@ -10,6 +10,16 @@ from fastapi.responses import JSONResponse
 import gradio as gr
 from huggingface_hub import HfApi, CommitOperationAdd
 
+# ZeroGPU compatibility handler
+try:
+    import spaces
+    @spaces.GPU(duration=10)
+    def gpu_init():
+        return "ZeroGPU Initialized"
+    gpu_init()
+except Exception:
+    pass
+
 # Configuration
 REPO_ID = os.environ.get("HF_DATASET_REPO", "vykrum/peer-review")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
